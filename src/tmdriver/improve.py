@@ -414,6 +414,54 @@ def open_map(sess: GameSession, track_id: Optional[int], replays: int, log=print
     return m['name'], m['uid'], m['best_ms']
 
 
+def map_file_for(uid: str, track_id: Optional[int], log=print) -> Optional[str]:
+    """The map's file name in <game folder>/Tracks/Challenges/TMDriver (what helper instances
+    load), fetched from TMX if needed; None if the map is not on TMX (e.g. a campaign map)."""
+    from . import tmx
+    from .evaluate import map_list
+    known = json.loads(FETCHED.read_text(encoding='utf-8')) if FETCHED.exists() else {}
+    cands = list(map_list(str(track_id))) if track_id else []
+    cands += [m for m in known.values() if m.get('uid') == uid]
+    for m in cands:
+        if m.get('uid') == uid:
+            return m['map_file']            # the name the main instance loads it by, too
+    try:
+        tid = track_id or tmx.track_id_by_uid(uid)
+        if tid:
+            from .paths import TMX
+            return tmx.fetch(tid, 0, TMX, safe, log=lambda *a: None)['map'].name
+    except Exception as e:
+        log(f'  TMX: {e}')
+    return None
+
+
+def helper_sessions(links, uid: str, track_id: Optional[int], log=print) -> list:
+    """GameSessions on the helper instances, each with the map loaded and drivable. Instances
+    that fail are left out (with a message); no map file: no helpers."""
+    links = list(links)
+    if not links:
+        return []
+    f = map_file_for(uid, track_id, log)
+    if f is None:
+        log(f'{len(links)} helper instance(s) not used: this map is not on TMX, so they cannot load it')
+        return []
+    out = []
+    for k, h in enumerate(links):
+        tag = f'[#{k + 2}]'
+        hs = GameSession(h, lambda *a, tag=tag: log(tag, *a))
+        hs.focus = False                    # the window focus belongs to the main instance
+        try:
+            if not hs.load_map(f, uid):
+                log(f'{tag} did not load the map: not used')
+                continue
+            hs.ensure_drivable()
+        except Exception as e:
+            log(f'{tag} not used: {e!r}'[:200])
+            continue
+        out.append(hs)
+    return out
+
+
 def reference(uid: str, track_id: Optional[int], log=print):
     """The fastest known run of the map as (positions, source), or None: re-simulated > TMX
     replay > recording; if there is none, the map's replays are fetched from TMX (by uid).
@@ -452,11 +500,14 @@ def reference_setup(uid: str, track_id: Optional[int], use_line: bool, log=print
 def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: int = 6, elite_k: int = 3,
             steps: int = 12, bs: int = 64, lr: float = 1e-4, temps=(0.4, 0.7, 1.0), show: bool = True,
             ckpt: Path = None, branch: int = 8, seed: Optional[int] = None, use_line: bool = False,
-            log=print):
+            helpers=(), log=print):
     """branch > 0: from round 2 on, `branch` of the runs start from a state saved shortly before
     the best run got stuck (or anywhere along it once it finishes), so the attempts are spent on
     the hard part instead of re-driving the start every time.
-    use_line: give the model the reference line (fastest known run); default: blocks only."""
+    use_line: give the model the reference line (fastest known run); default: blocks only.
+    helpers: Links to more game instances (instances.py): the runs of a round are spread over
+    all instances (fleet.py); new best runs are shown in the main one."""
+    from .fleet import Fleet, policy_view
     ckpt = Path(ckpt or DRIVER_CKPT)
     policy = GhostPolicy(ckpt, device=torch_device())
     sess = GameSession(link, log)
@@ -464,11 +515,14 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
     line, judge, line_txt = reference_setup(uid, track_id, use_line, log)
     policy.reset([b.__dict__ for b in sess.map.blocks], line, judge)
     draw(link, [])                                  # boxes of an earlier map or training
+    fleet = Fleet(sess, helper_sessions(helpers, uid, track_id, log))
+    pols = [policy] + [policy_view(policy) for _ in fleet.sessions[1:]]
     out = OUT / safe(uid)
     out.mkdir(parents=True, exist_ok=True)
     limit = int(2 * best_ms + 10000) if best_ms else 180000
     line_tag = 'with line' if line is not None else 'no line'
-    log(f"improve {name!r}: {rounds} rounds x {episodes + 1} runs, model {ckpt}")
+    log(f"improve {name!r}: {rounds} rounds x {episodes + 1} runs on {len(fleet)} game instance(s), "
+        f"model {ckpt}")
     log(f"reference line: {line_txt}")
     sess.ensure_drivable()
 
@@ -500,26 +554,35 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
     try:
         for rnd in range(rounds):
             t0 = time.perf_counter()
-            eps = [ImproveEpisode(policy, limit, 0.0, seed)]
+            n = len(fleet)
+            groups = [[] for _ in range(n)]
+            groups[0].append(ImproveEpisode(pols[0], limit, 0.0, seed))       # greedy: result 0
             bt = branch_point(best, brng) if branch and best is not None else None
             n_start = episodes if bt is None else max(1, episodes // 3)
             for k in range(n_start):
                 seed += 1
-                eps.append(ImproveEpisode(policy, limit, temps[k % len(temps)], seed))
+                i = (k + 1) % n
+                groups[i].append(ImproveEpisode(pols[i], limit, temps[k % len(temps)], seed))
             if bt is not None:
-                pre = PrefixEpisode(link, policy, best, bt, log=log)
-                eps.append(pre)
-                for k in range(branch):
-                    seed += 1
-                    eps.append(BranchEpisode(policy, limit, temps[k % len(temps)], seed, pre))
-            sess.status(f'Training {name} ({line_tag}): round {rnd + 1}/{rounds}' +
-                        (f", best {best['time_ms'] / 1000:.2f}s" if best and best['finished'] else ''))
-            res = sess.run(eps, sim_only=True, keep=True)      # the game stays frozen until release()
-            res = [r for r in res if not r.get('prefix')]
+                # every instance that gets branch runs replays the best run to bt itself first
+                share = [branch // n + (1 if i < branch % n else 0) for i in range(n)]
+                for i in range(n):
+                    if not share[i]:
+                        continue
+                    pre = PrefixEpisode(fleet.sessions[i].link, pols[i], best, bt, log=log)
+                    groups[i].append(pre)
+                    for k in range(share[i]):
+                        seed += 1
+                        groups[i].append(BranchEpisode(pols[i], limit, temps[k % len(temps)], seed, pre))
+            for s_ in fleet.sessions:
+                s_.status(f'Training {name} ({line_tag}): round {rnd + 1}/{rounds}' +
+                          (f", best {best['time_ms'] / 1000:.2f}s" if best and best['finished'] else ''))
+            out_groups = fleet.run(groups, sim_only=True, keep=True)   # the games stay frozen until release()
+            res = [r for g in out_groups for r in g if not r.get('prefix')]
             elite = sorted(elite + res, key=score, reverse=True)[:elite_k]
             improved = best is None or score(elite[0]) > score(best)
             best = elite[0]
-            with sess.hold():                                   # learning: game frozen, plugin kept waiting
+            with fleet.hold():                                  # learning: games frozen, plugins kept waiting
                 loss = fine_tune(policy, elite, steps, bs, lr, log)
             fin = [r['time_ms'] for r in res if r['finished']]
             greedy = res[0]
@@ -544,23 +607,24 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
             log(f"round {rnd + 1}: greedy {rec['greedy']}, {rec['finished']} finished, best {best_txt}"
                 f"{' (new)' if improved else ''}, {rec['seconds']}s  [{stops}{br}]")
             if improved:
-                with sess.hold():
+                with fleet.hold():
                     draw(link, best['path'])          # the best line so far, visible in the game
                     save_best(rnd)
                 if show and best['ticks'] and rnd + 1 < rounds:
                     log(f'  showing the new best run ({best_txt}) in the game (respawn skips it) ...')
                     sess.status(f'New best {best_txt} (round {rnd + 1}): showing it. Respawn = skip')
-                    shown = sess.run([Playback(best['ticks'])], sim_only=False)[0]    # ends the frozen state
+                    with fleet.hold(skip_main=True):              # helpers wait meanwhile
+                        shown = sess.run([Playback(best['ticks'])], sim_only=False)[0]  # ends main's frozen state
                     if shown['aborted']:
                         log('  skipped (respawn): next round')
     except KeyboardInterrupt:
         stopped = True
         log(f'\nstopped in round {rnd + 1}' + (f': best so far {run_text(best)}' if best else ': no run yet'))
-        sess.recover()
+        fleet.recover()
         if best is not None:
             draw(link, best['path'])
             save_best(rnd)
-    sess.release()
+    fleet.release()
     if best is None:
         sess.status('Training stopped before the first round finished.')
         return history

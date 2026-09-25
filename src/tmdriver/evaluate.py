@@ -132,7 +132,7 @@ def run_eval(link, which: str = 'holdout', watch: bool = False, speed: float = 1
             t = f"{r['reason']} at {r['progress_m']:.0f} m" + (f" ({r['progress']:.0%})" if r['progress'] else '')
         log(f"[{k + 1}/{len(maps)}] {m['name']!r}{' [held-out]' if m['holdout'] else ''}: {t}")
     fin = [r for r in results if r['finished']]
-    summary = f"{len(fin)}/{len(results)} im Ziel"
+    summary = f"{len(fin)}/{len(results)} finished"
     if fin:
         summary += f", im Mittel {sum(r['time_ms'] / r['best_ms'] for r in fin) / len(fin):.2f}x Bestzeit"
     sess.status(f'Evaluation done: {summary}')

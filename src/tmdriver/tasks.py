@@ -100,7 +100,7 @@ class Recorder(Task):
     def __init__(self, link, ctx):
         super().__init__(link, ctx)
         self.steps: List[P.Step] = []
-        link.status('Aufnahme: fahr die Map einmal sauber bis ins Ziel.')
+        link.status('Recording: drive the map once, cleanly, to the finish.')
         link.flush()
 
     def on_step(self, step: P.Step):
@@ -110,7 +110,7 @@ class Recorder(Task):
         if not step.finished:
             return
         if self.ctx.map is None:
-            self.finish('Aufnahme verworfen: das Plugin hat keine Map gemeldet.')
+            self.finish('Recording discarded: the plugin did not announce a map.')
             self.link.flush()
             return
         a = steps_to_arrays(self.steps)
@@ -123,12 +123,12 @@ class Recorder(Task):
         fwd = calibrate_forward(a['rot'], a['vel'])
         known = self.ctx.calib.forward
         if fwd and known and (fwd['kind'], fwd['idx'], fwd['sign']) != known:
-            notes.append(f'WARNUNG Vorwaertsachse passt nicht zur Kalibrierung: {fwd}')
+            notes.append(f'WARNING: the forward axis does not match the calibration: {fwd}')
         analog = float(np.mean(a['in_steer'] != 0))
         pressed = float(np.mean(a['in_bits'] != 0))
-        notes.append(f'analog lenken {analog:.0%}, Tasten aktiv {pressed:.0%} der Ticks')
+        notes.append(f'analog steering {analog:.0%}, keys pressed {pressed:.0%} of the ticks')
         self.ctx.log(f'recorded {len(self.steps)} ticks, finish {finish / 1000:.2f}s -> {path}; ' + '; '.join(notes))
-        self.finish(f'Aufnahme gespeichert: {finish / 1000:.2f} s, {len(self.steps)} Ticks. ' + notes[-1])
+        self.finish(f'Recording saved: {finish / 1000:.2f} s, {len(self.steps)} ticks. ' + notes[-1])
         self.link.flush()
 
 
@@ -172,7 +172,7 @@ class GhostController:
 
 
 class Driver(Task):
-    """"AI fahren": the learned model if one is trained (runs/m1/driver.pt), otherwise
+    """"AI drive (live)": the learned model if one is trained (runs/m1/driver.pt), otherwise
     pure pursuit on cheatoskar's recording."""
     blocking = True
     STALL_S = 3.0
@@ -191,7 +191,7 @@ class Driver(Task):
     def _setup(self) -> Optional[str]:
         c = self.ctx
         if not c.calib.ready():
-            return 'Bitte zuerst den Selbsttest laufen lassen (misst Lenkrichtung und Fahrzeugachsen).'
+            return 'Please run the self-test first (it measures the steering sign and the car axes).'
         rec = c.line_path()
         self.ref_finish = int(np.load(rec)['finish_ms']) if rec is not None and rec.exists() else None
         policy = c._policy if DRIVER_CKPT.exists() else None   # preloaded on the button press
@@ -200,23 +200,23 @@ class Driver(Task):
             # the reference line only with `serve --line` (TMDRIVER_LINE=1), as for Drive / Train
             use_line = os.environ.get('TMDRIVER_LINE') == '1'
             ref = pol.reference_positions(c.map.uid, pol.track_id_for(c.map.uid)) if use_line else None
-            line_pos, src = ref if ref else (None, 'keine Linie, nur Bloecke')
+            line_pos, src = ref if ref else (None, 'no line, blocks only')
             self.ctrl = GhostController(policy, [b.__dict__ for b in c.map.blocks], line_pos)
-            self.kind = f'Modell {Path(policy.ckpt).parent.name}/{Path(policy.ckpt).name}, Linie: {src}'
+            self.kind = f'model {Path(policy.ckpt).parent.name}/{Path(policy.ckpt).name}, line: {src}'
         elif policy is not None and c.map is not None:
             from . import policy as pol
             ref = pol.reference_line(c.map.uid, pol.track_id_for(c.map.uid))
             if ref is None:
-                return 'Modell vorhanden, aber keine Referenzlinie fuer diese Map (keine TMX-Replays, keine Aufnahme).'
+                return 'Model found, but no reference line for this map (no TMX replays, no recording).'
             line, src = ref
             self.ctrl = ModelController(policy, [b.__dict__ for b in c.map.blocks], line)
-            self.kind = f'Modell, Linie: {src}'
+            self.kind = f'model, line: {src}'
         else:
             if rec is None or not rec.exists():
-                return 'Keine Aufnahme fuer diese Map. Zuerst "Aufnehmen" und einmal selbst ins Ziel fahren.'
+                return 'No recording for this map. Press "Record" first and drive to the finish once.'
             line = RefLine.load(rec)
             self.ctrl = Pursuit(line, c.calib.forward, c.calib.steer_sign)
-            self.kind = 'Nachfahr-Regler (kein Modell)'
+            self.kind = 'line follower (no model)'
         self.link.speed(c.ui_speed)
         self.link.status(f'AI faehrt ({self.kind}), Versuch 1')
         return None
@@ -237,8 +237,8 @@ class Driver(Task):
 
         if step.finished:
             t = step.race_time
-            ref = f'  (deine Aufnahme {self.ref_finish / 1000:.2f} s)' if self.ref_finish else ''
-            msg = f'Ziel! AI {t / 1000:.2f} s{ref}  [{self.kind}]'
+            ref = f'  (your recording {self.ref_finish / 1000:.2f} s)' if self.ref_finish else ''
+            msg = f'Finish! AI {t / 1000:.2f} s{ref}  [{self.kind}]'
             self._log_attempt(True, t)
             self.link.speed(1.0)
             self.finish(msg)
@@ -254,12 +254,12 @@ class Driver(Task):
             if self.attempt >= self.MAX_ATTEMPTS:
                 self.link.speed(1.0)
                 total = self.ctrl.line.length
-                of = f' von {total:.0f} m' if total != float('inf') else ''
-                self.finish(f'AI kommt nicht weiter (bei {prog:.0f} m{of}), abgebrochen. [{self.kind}]')
+                of = f' of {total:.0f} m' if total != float('inf') else ''
+                self.finish(f'AI is stuck (at {prog:.0f} m{of}), stopped. [{self.kind}]')
                 self.link.action(0, 0, 0)
                 return
             self.attempt += 1
-            self.link.status(f'AI steckt fest bei {prog:.0f} m, Versuch {self.attempt}')
+            self.link.status(f'AI stuck at {prog:.0f} m, attempt {self.attempt}')
             self.link.restart()
             self.link.action(0, 0, 0)
             return
@@ -320,7 +320,7 @@ class SelfTest(Task):
         self.jobs: List[Dict] = []
         self.job: Optional[Dict] = None
         self.bench_queue = list(self.BENCH_SPEEDS)
-        link.status('Selbsttest laeuft (Bild friert kurz ein, das ist normal) ...')
+        link.status('Self-test running (the picture freezes briefly, that is normal) ...')
 
     # -- helpers
     def _start_run(self, name: str, step: P.Step):
@@ -376,7 +376,7 @@ class SelfTest(Task):
                                   'table': table, 'shift': shift, 'steer_sign': 1, 'ref': ref,
                                   'finish_ms': int(h['finish_ms']), 'need_exact_pos': True})
         else:
-            self.report['own_recording'] = 'keine Aufnahme fuer diese Map'
+            self.report['own_recording'] = 'no recording for this map'
 
         folder = TMX / safe(self.ctx.map.uid) if self.ctx.map else None
         reps = []
@@ -538,17 +538,17 @@ class SelfTest(Task):
         out.write_text(json.dumps(r, indent=1))
         det = r.get('determinism', {})
         bench = r.get('bench_ticks_per_s', {})
-        parts = [f"Selbsttest fertig. Determinismus max {det.get('max_diff_m', float('nan')):.4f} m",
-                 f"Python-Schleife {r.get('scripted_python_loop_ticks_per_s')} Ticks/s",
-                 f"Physik {bench.get('100.0')} Ticks/s",
-                 f"Kalibrierung {'OK' if r['calibration_ready'] else 'FEHLT'}"]
-        for src, label in (('recording', 'Eigene Aufnahme'), ('tmx', 'TMX-Replay')):
+        parts = [f"Self-test done. Determinism max {det.get('max_diff_m', float('nan')):.4f} m",
+                 f"Python loop {r.get('scripted_python_loop_ticks_per_s')} ticks/s",
+                 f"physics {bench.get('100.0')} ticks/s",
+                 f"calibration {'OK' if r['calibration_ready'] else 'MISSING'}"]
+        for src, label in (('recording', 'Own recording'), ('tmx', 'TMX replay')):
             rs = [x for x in r['replays'] if x.get('source') == src and 'error' not in x]
             if rs:
                 ok = [x for x in rs if x.get('exact')]
-                parts.append(f"{label} exakt: " + (', '.join(f"shift {x['shift']} sign {x['steer_sign']}"
-                                                              for x in ok) if ok else 'NEIN'))
-        msg = '. '.join(parts) + f'. Bericht: {out.name}'
+                parts.append(f"{label} exact: " + (', '.join(f"shift {x['shift']} sign {x['steer_sign']}"
+                                                              for x in ok) if ok else 'NO'))
+        msg = '. '.join(parts) + f'. Report: {out.name}'
         self.ctx.log(json.dumps(r, indent=1))
         self.finish(msg)
         self.link.action(0, 0, 0)

@@ -58,7 +58,7 @@ def main():
 
     # 1) self test without a recording
     game.press(P.MODE_TEST)
-    wait_status(game, 'Selbsttest fertig')
+    wait_status(game, 'Self-test done')
     r = latest_report(tmp / 'runs')
     print('selftest 1:', json.dumps({k: r[k] for k in ('determinism', 'forward_axis', 'steer_sign',
                                                         'scripted_python_loop_ticks_per_s', 'bench_ticks_per_s')}))
@@ -71,13 +71,13 @@ def main():
 
     # 2) record a human run
     game.press(P.MODE_RECORD)
-    st = wait_status(game, 'Aufnahme gespeichert')
+    st = wait_status(game, 'Recording saved')
     print('record:', st)
     human_ms = float(re.search(r'([\d.]+) s', st).group(1)) * 1000
 
     # 3) self test again: now also replays the recorded inputs
     game.press(P.MODE_TEST)
-    wait_status(game, 'Selbsttest fertig')
+    wait_status(game, 'Self-test done')
     r = latest_report(tmp / 'runs')
     by = {x['name']: x for x in r['replays']}
     h0, h1 = by['own_recording_shift0'], by['own_recording_shift1']
@@ -88,9 +88,9 @@ def main():
 
     # 4) AI drives the recorded line
     game.press(P.MODE_DRIVE, speed=3.0)
-    st = wait_status(game, r'Ziel!|abgebrochen')
+    st = wait_status(game, r'Finish!|stopped')
     print('drive:', st)
-    assert 'Ziel!' in st, st
+    assert 'Finish!' in st, st
     ai_ms = float(re.search(r'AI ([\d.]+) s', st).group(1)) * 1000
     assert ai_ms < human_ms * 1.25, (ai_ms, human_ms)
     assert abs(game.speed - 1.0) < 1e-6, 'speed must be restored after driving'

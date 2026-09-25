@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import fake_game as FG  # noqa: E402
 import test_ghost_fake as TG  # noqa: E402
+from tmdriver import protocol as P  # noqa: E402
 from tmdriver.link import Link  # noqa: E402
 from tmdriver.paths import DATA, RUNS  # noqa: E402
 
@@ -123,6 +124,37 @@ def main():
         assert shown == [False], (where, shown)            # the best run was shown once, visibly
         IM.show_best(link, track_id=tid)                    # the connection is still in sync
         print(f'OK: stopped in {where}: best run saved and shown, link still in sync')
+
+    # two game instances (fleet.py): the helper loads the map and drives its share of every
+    # round, branch runs included; the best run is shown on the main instance only
+    helper = FG.FakeGame(PORT + 7)
+    helper.maps = game.maps
+    steps = {'main': 0, 'helper': 0}
+    for g, key in ((game, 'main'), (helper, 'helper')):
+        orig_send = g.send_step
+
+        def counted(msg=P.P_STEP, orig_send=orig_send, key=key):
+            steps[key] += 1
+            return orig_send(msg)
+
+        g.send_step = counted
+    helper.start()
+    shown.clear()
+    IM.GameSession.run = run
+    prefixes.clear()
+    IM.PrefixEpisode.result = pre_result
+    hist = IM.improve(link, track_id=tid, rounds=3, episodes=3, steps=5, bs=64, branch=4,
+                      helpers=[Link.connect(port=PORT + 7, wait_s=5)])
+    IM.GameSession.run, IM.PrefixEpisode.result = orig_run, orig_pre
+    assert len(hist) == 3 and steps['helper'] > 1000 and steps['main'] > 1000, (len(hist), steps)
+    # greedy + 3 sampled; with branching greedy + 1 sampled + 4 branch runs (the prefixes are not results)
+    assert all(int(h['finished'].split('/')[1]) == (6 if h['branch_from_s'] else 4) for h in hist), \
+        [h['finished'] for h in hist]
+    assert prefixes and all(r['diverged_m'] < 1e-3 for r in prefixes), prefixes
+    assert shown and not any(shown), shown
+    helper.stop_flag = True
+    print(f"OK: two instances: {[h['finished'] for h in hist]} per round, ticks {steps}, "
+          f"prefix replays exact on both ({len(prefixes)})")
     game.stop_flag = True
     print('OK: improve ran rounds, fine-tuned, exported and played back')
 

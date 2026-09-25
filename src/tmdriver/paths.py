@@ -8,7 +8,7 @@ RUNS = Path(os.environ.get('TMDRIVER_RUNS', ROOT / 'runs'))
 LINES = DATA / 'lines'          # recorded runs, one per map uid
 LIVE_MAPS = DATA / 'live_maps'  # block lists sent by the plugin
 CALIBRATION = DATA / 'calibration.json'
-# The driver "AI fahren" uses: TMDRIVER_CKPT (serve --model) if set, else the replay
+# The driver "AI drive (live)" uses: TMDRIVER_CKPT (serve --model) if set, else the replay
 # fine-tune (runs/ghost_ft, sees the car's orientation), else the pretrained ghost-feature
 # model (runs/ghost), else the M1 model.
 DRIVER_CKPT = Path(os.environ.get('TMDRIVER_CKPT') or next(

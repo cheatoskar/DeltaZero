@@ -3,7 +3,7 @@
     python tests/test_ghost_fake.py
 
 synthetic HF-style trace + MX block parquet parts -> ghost-build -> pretrain (short, CPU)
--> eval (the model drives every fake map) -> "AI fahren" via serve uses the ghost model.
+-> eval (the model drives every fake map) -> "AI drive (live)" via serve uses the ghost model.
 It checks the plumbing and the conventions, not driving quality (the fake world is tiny).
 """
 import json
@@ -131,15 +131,15 @@ def main():
     srv = S.Server(Link.connect(port=PORT + 1, wait_s=5), log=print)
     threading.Thread(target=srv.run, daemon=True).start()
     t0 = time.monotonic()
-    while 'verbunden' not in game2.status and time.monotonic() - t0 < 30:
+    while 'connected' not in game2.status and time.monotonic() - t0 < 30:
         time.sleep(0.05)
     game2.press(P.MODE_DRIVE, speed=1.0)
     t0 = time.monotonic()
-    while not any(w in game2.status for w in ('Ziel!', 'abgebrochen', 'Bitte zuerst')):
+    while not any(w in game2.status for w in ('Finish!', 'stopped', 'Please run the self-test')):
         assert time.monotonic() - t0 < 180 and game2.is_alive(), game2.status
         time.sleep(0.05)
     print('drive button:', game2.status)
-    assert 'Modell ghost/best.pt' in game2.status, game2.status
+    assert 'model ghost/best.pt' in game2.status, game2.status
     game2.stop_flag = True
     print('OK: ghost-build, pretrain, eval and the drive button ran end to end')
 

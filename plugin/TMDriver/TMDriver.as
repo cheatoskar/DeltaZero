@@ -68,7 +68,7 @@ Net::Socket@ server = null;
 Net::Socket@ client = null;
 
 int mode = MODE_IDLE;
-string status = "Start TMDriver_starten.bat in the TMDriverAI folder.";
+string status = "Start Start_DeltaZero.bat in the DeltaZero folder.";
 float uiSpeed = 1.0f;
 
 // tool settings
@@ -719,7 +719,7 @@ void Render()
         }
         UI::TextWrapped(status);
         if (client is null) {
-            UI::TextWrapped("Start 'TMDriver_starten.bat' in the TMDriverAI folder first.");
+            UI::TextWrapped("Start 'Start_DeltaZero.bat' in the DeltaZero folder first.");
         }
         UI::Separator();
         jobMap = UI::InputInt("Map (TMX id)", jobMap, 0);

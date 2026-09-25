@@ -60,7 +60,7 @@ def reference_positions(uid: str, track_id: Optional[int] = None) -> Optional[tu
         return r.ghost_pos, f'TMX ghost ({r.race_time_ms / 1000:.2f}s)'
     rec = LINES / f'{safe(uid)}.npz'
     if rec.exists():
-        return np.load(rec)['pos'].astype(np.float64), 'eigene Aufnahme'
+        return np.load(rec)['pos'].astype(np.float64), 'own recording'
     return None
 
 
@@ -89,7 +89,7 @@ def reference_line(uid: str, track_id: Optional[int] = None) -> Optional[tuple]:
         return RefLine(r.ghost_pos, np.zeros(len(r.ghost_pos))), f'TMX ghost ({r.race_time_ms / 1000:.2f}s)'
     rec = LINES / f'{safe(uid)}.npz'
     if rec.exists():
-        return RefLine.load(rec), 'eigene Aufnahme'
+        return RefLine.load(rec), 'own recording'
     return None
 
 

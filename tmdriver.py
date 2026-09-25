@@ -149,8 +149,11 @@ def pretrain(args):
 
 def improve(args):
     from tmdriver.improve import improve as run
-    run(_link(args), track_id=args.map, rounds=args.rounds, episodes=args.episodes, show=not args.no_show,
-        ckpt=args.model or None, branch=args.branch, seed=args.seed, use_line=args.line)
+    link = _link(args)
+    from tmdriver.instances import connect_helpers
+    helpers = connect_helpers(args.port) if args.helpers == 'auto' else []
+    run(link, track_id=args.map, rounds=args.rounds, episodes=args.episodes, show=not args.no_show,
+        ckpt=args.model or None, branch=args.branch, seed=args.seed, use_line=args.line, helpers=helpers)
 
 
 def show(args):
@@ -278,6 +281,7 @@ def main():
                     help='runs per round that start shortly before where the best run got stuck (0 = off)')
     im.add_argument('--seed', type=int, default=None, help='random seed (default: a new one each time)')
     im.add_argument('--no-show', action='store_true', help='do not show new best runs in the game')
+    im.add_argument('--helpers', default='auto', help='auto: spread the runs over every running helper instance | 0: main only')
     im.add_argument('--line', action='store_true', help='give the model the reference line (fastest TMX replay; fetched if missing). Default: blocks only')
     im.add_argument('--port', type=int, default=P.PORT)
     im.set_defaults(fn=improve)
@@ -306,7 +310,7 @@ def main():
     os.environ['TMDRIVER_DEVICE'] = args.device
     done = os.environ.get('TMDRIVER_JOB_DONE_FILE')
     if not done and args.cmd in GAME_COMMANDS and serve_running():
-        sys.exit('TMDriver_starten.bat (serve) is running: it would take the game connection away from '
+        sys.exit('Start_DeltaZero.bat (serve) is running: it would take the game connection away from '
                  'this command. Close its window first, or use the buttons in the game instead.')
     if not done:
         args.fn(args)
@@ -320,17 +324,17 @@ def main():
             pass
     try:
         args.fn(args)
-        print('\nFertig.')
+        print('\nDone.')
     except KeyboardInterrupt:
-        print('\nGestoppt.')
+        print('\nStopped.')
     except BaseException:
         import traceback
         traceback.print_exc()
-        print('\nFEHLER (siehe oben). Bitte die letzten Zeilen schicken.')
+        print('\nERROR (see above). Please send the last lines.')
     finally:
         Path(done).touch()     # the server takes the game connection back now
     try:
-        input('Enter schliesst dieses Fenster.')
+        input('Press Enter to close this window.')
     except EOFError:
         pass
 

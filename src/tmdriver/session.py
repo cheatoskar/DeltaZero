@@ -113,6 +113,7 @@ class GameSession:
         self.q = link._pump_q
         self._held = None      # the start STEP while the plugin is kept waiting (run(keep=True))
         self.focus = True      # bring the game window to the front for map loads (main instance)
+        self.stop = None       # a threading.Event: when set, run() ends its episodes early
         link.strict = True     # one ACTION per STEP, checked (see Link.owed)
         # No "Press any key to continue" / opponent screens between map loads (TMInterface
         # variable; without it cheatoskar had to press Enter on every map).
@@ -364,7 +365,8 @@ class GameSession:
                     self._play(ep)
                 phase = 'run'
             else:
-                a = ep.act(st)
+                # stop (fleet.Fleet on Ctrl+C): end every remaining episode at its next STEP
+                a = None if self.stop is not None and self.stop.is_set() else ep.act(st)
             while a is None:                 # episode over: next one from the saved start
                 results.append(ep.result())
                 i += 1

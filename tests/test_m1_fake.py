@@ -3,7 +3,7 @@
     python tests/test_m1_fake.py
 
 manifest -> resim (map loading, replay inputs, exactness) -> dataset (convention checks,
-features) -> train (short) -> eval (the model drives) -> "AI fahren" via serve.
+features) -> train (short) -> eval (the model drives) -> "AI drive (live)" via serve.
 Six fake maps face all four block directions; replays are keyboard and pad drivers.
 """
 import json
@@ -142,7 +142,7 @@ def main():
     assert len(ev) == len(DIRS)
     print('eval:', [(r['name'], r['finished'], r['time_ms'], r['progress']) for r in ev])
 
-    # 5) the window button path: serve + "AI fahren" must use the model
+    # 5) the window button path: serve + "AI drive (live)" must use the model
     link.close()
     game.stop_flag = True
     from tmdriver import server as S
@@ -154,15 +154,15 @@ def main():
     srv = S.Server(Link.connect(port=PORT + 1, wait_s=5), log=print)
     threading.Thread(target=srv.run, daemon=True).start()
     t0 = time.monotonic()
-    while 'verbunden' not in game2.status and time.monotonic() - t0 < 30:
+    while 'connected' not in game2.status and time.monotonic() - t0 < 30:
         time.sleep(0.05)
     game2.press(P.MODE_DRIVE, speed=1.0)
     t0 = time.monotonic()
-    while not any(w in game2.status for w in ('Ziel!', 'abgebrochen', 'Referenz', 'Bitte zuerst')):
+    while not any(w in game2.status for w in ('Finish!', 'stopped', 'reference line', 'Please run the self-test')):
         assert time.monotonic() - t0 < 120 and game2.is_alive(), game2.status
         time.sleep(0.05)
     print('drive button:', game2.status)
-    assert '[Modell' in game2.status, game2.status
+    assert '[model' in game2.status, game2.status
     game2.stop_flag = True
     print('OK: resim, dataset, train, eval and the drive button ran end to end')
 

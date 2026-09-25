@@ -17,10 +17,10 @@ faster on a map by practising it, through a TMInterface plugin.
   physics state, as training data for later stages. A batch mode lets the plugin play the
   inputs itself, the way TMInterface's bruteforce does.
 
-> Status (2026-09-25): research prototype. The pretrained model picks the exact steering
-> class in 78 % of held-out samples and the right steering direction in 80 %. First
-> in-game runs finish maps. See [docs/STUFEN.md](docs/STUFEN.md) (German) for the
-> roadmap.
+> Status (2026-09-25): research prototype. The best pretrained model (`ghost_big2`) picks
+> the exact steering class in 78.6 % of held-out samples and the right steering direction
+> in 81 %. First in-game runs finish maps. See [docs/STAGES.md](docs/STAGES.md) for the
+> roadmap and [docs/CONCEPT.md](docs/CONCEPT.md) for the original concept.
 
 The Python package is still called `tmdriver` and the plugin `TMDriver` (the project's
 working name).
@@ -63,22 +63,22 @@ pip install -r requirements.txt
 python tmdriver.py install-plugin        :: copies plugin/TMDriver into Documents\TMInterface\Plugins
 ```
 
-Models (`runs/`) and data (`data/`) are **not** in this repository. Copy them from an
-existing install or train them yourself (see `docs/VAST_RUN.md`). Reading .Gbx replays
-needs LZO: either the `lzo1x_*.dll` files in `src/tmdriver/gbx/lib/` (not included) or
-`pip install python-lzo`.
+The best checkpoints (`runs/*/best.pt`) are in this repository; data (`data/`) is not.
+Maps and replays are fetched from TMX when needed. Reading .Gbx files uses LZO: the
+`lzo1x_*.dll` files in `src/tmdriver/gbx/lib/` (not included), `pip install python-lzo`,
+or a slower pure-Python fallback.
 
 Then:
-1. Start the game and run `TMDriver_starten.bat`. It connects to the plugin; leave it open.
-2. In the game's **TMDriver AI** window, open **KI-Werkzeuge**.
-3. Pick a TMX id (0 means the current map), then press one of:
-   - **Linie planen + fahren**: plan the line, draw it, drive it;
-   - **KI trainieren**: practise the map for N rounds, then show the best run;
-   - **Nachsimulieren**: re-simulate the downloaded replays.
+1. Start the game and run `Start_DeltaZero.bat`. It connects to the plugin; leave it open.
+2. In the game's **DeltaZero** window, pick a TMX id (0 means the current map) and whether
+   the AI may use the reference line, then press one of:
+   - **Drive**: plan the line, draw it, drive it;
+   - **Train**: practise the map for N rounds, showing new best runs;
+   - **Re-simulate replays**: play TMX replays in the game and store the physics state.
 
    Each job opens its own console with live progress.
 
-Step-by-step guide (German): [docs/HEIMRECHNER.md](docs/HEIMRECHNER.md).
+Step-by-step guide: [docs/HOME_PC.md](docs/HOME_PC.md).
 
 ## Command line
 
