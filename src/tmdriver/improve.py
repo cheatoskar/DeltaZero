@@ -81,7 +81,8 @@ class ImproveEpisode(Episode):
         a = pol.act(st, sample=self.temp > 0, temp=max(self.temp, 1e-3), rng=self.rng)
         if pol.last_decision_t != before and pol.last_out is not None:
             o = pol.last_out
-            self.decisions.append((pol.last_inputs, o['bin'], o['gas'], o['brake'], st.race_time))
+            # (inputs, steer bin, gas, brake, race time, progress so far): rl.py makes rewards from the last two
+            self.decisions.append((pol.last_inputs, o['bin'], o['gas'], o['brake'], st.race_time, pol.progress_m))
         if st.race_time >= 0:
             self.ticks.append((st.race_time, *a))
             if st.race_time % 100 == 0:
@@ -116,7 +117,7 @@ class ImproveEpisode(Episode):
 
     def result(self):
         return {'finished': self.finish is not None, 'time_ms': self.finish, 'progress_m': round(self.best, 1),
-                'cps': self.policy.cps, 'reason': self.reason, 'race_ms': self.last_t, 'temp': self.temp, 'start_kmh': self.start_kmh,
+                'cps': self.policy.cps, 'final_progress': self.policy.progress_m, 'reason': self.reason, 'race_ms': self.last_t, 'temp': self.temp, 'start_kmh': self.start_kmh,
                 'decisions': self.decisions, 'ticks': self.ticks, 'stall_t': self.best_t, 'path': self.path}
 
 
@@ -261,7 +262,7 @@ def fine_tune(policy: GhostPolicy, elite: List[dict], steps: int, bs: int, lr: f
         opt.step()
     model.eval()
     torch.set_num_threads(threads)
-    return float(loss)
+    return float(loss.detach())
 
 
 def tmi_script(ticks) -> str:

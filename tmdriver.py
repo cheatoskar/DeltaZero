@@ -112,6 +112,16 @@ def resim(args):
               track_ids=ids, helpers=helpers)
 
 
+def rl(args):
+    from tmdriver.rl import rl_train
+    link = _link(args)
+    from tmdriver.instances import connect_helpers
+    helpers = connect_helpers(args.port) if args.helpers == 'auto' else []
+    rl_train(link, track_id=args.map, iterations=args.iterations, runs=args.runs, branch=args.branch,
+             use_line=args.line, helpers=helpers, show=not args.no_show, ckpt=args.model or None, lr=args.lr,
+             warmup=args.warmup, kl_coef=args.kl, seed=args.seed)
+
+
 def tmx_pool(args):
     import json
     from tmdriver import tmx
@@ -195,7 +205,7 @@ def ghost_replays(args):
     build_all(workers=args.workers, rebuild=args.rebuild)
 
 
-GAME_COMMANDS = {'resim', 'improve', 'drive', 'show', 'eval', 'launch'}
+GAME_COMMANDS = {'resim', 'improve', 'drive', 'show', 'eval', 'launch', 'rl'}
 
 
 def serve_running() -> bool:
@@ -322,6 +332,21 @@ def main():
     dv.add_argument('--line', action='store_true', help='give the model the reference line (fastest TMX replay; fetched if missing). Default: blocks only')
     dv.add_argument('--port', type=int, default=P.PORT)
     dv.set_defaults(fn=drive)
+    rp = sub.add_parser('rl', help='RL v2 (PPO) on one map, over every running instance (serve must NOT run)')
+    rp.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
+    rp.add_argument('--iterations', type=int, default=30)
+    rp.add_argument('--runs', type=int, default=8, help='sampled runs per iteration (+1 greedy, + branch runs)')
+    rp.add_argument('--branch', type=int, default=4, help='runs that start before where the best run got stuck')
+    rp.add_argument('--line', action='store_true', help='give the model the reference line (default: blocks only)')
+    rp.add_argument('--lr', type=float, default=1e-5)
+    rp.add_argument('--warmup', type=int, default=2, help='iterations that train only the critic')
+    rp.add_argument('--kl', type=float, default=0.1, help='KL leash to the starting model')
+    rp.add_argument('--model', default='', help='checkpoint (default: as serve)')
+    rp.add_argument('--seed', type=int, default=None)
+    rp.add_argument('--no-show', action='store_true')
+    rp.add_argument('--helpers', default='auto')
+    rp.add_argument('--port', type=int, default=P.PORT)
+    rp.set_defaults(fn=rl)
     tp = sub.add_parser('tmx-pool', help='map pool from the TMX search: most awarded maps in a time range')
     tp.add_argument('--maps', type=int, default=2000)
     tp.add_argument('--min', type=float, default=5.0, help='minimum author time in seconds')

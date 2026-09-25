@@ -101,7 +101,8 @@ class DriverNet2(nn.Module):
         pad = torch.cat([torch.zeros(B, 1 + r.shape[1], dtype=torch.bool, device=state.device), ~bmask], 1)
         h = self.norm(self.encoder(x, src_key_padding_mask=pad)[:, 0])
         p = self.pedals(h)
-        return {'steer': self.steer(h), 'gas': p[:, 0], 'brake': p[:, 1], 'value': self.value(h).squeeze(-1)}
+        return {'steer': self.steer(h), 'gas': p[:, 0], 'brake': p[:, 1], 'value': self.value(h).squeeze(-1),
+                'h': h}       # the state token after the encoder (RL: the critic reads it)
 
 
 def n_params(m) -> float:
