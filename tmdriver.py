@@ -128,6 +128,11 @@ def improve(args):
         ckpt=args.model or None)
 
 
+def show(args):
+    from tmdriver.improve import show_best
+    show_best(_link(args), track_id=args.map, speed=args.speed)
+
+
 def drive(args):
     from tmdriver.improve import drive_preview
     drive_preview(_link(args), track_id=args.map, speed=args.speed, ckpt=args.model or None)
@@ -218,9 +223,14 @@ def main():
     im.add_argument('--rounds', type=int, default=20)
     im.add_argument('--episodes', type=int, default=6, help='sampled runs per round (+1 greedy)')
     im.add_argument('--model', default='', help='checkpoint (default: as serve)')
-    im.add_argument('--no-show', action='store_true', help='do not play the best run back at the end')
+    im.add_argument('--no-show', action='store_true', help='do not show new best runs in the game')
     im.add_argument('--port', type=int, default=P.PORT)
     im.set_defaults(fn=improve)
+    sh = sub.add_parser('show', help='play the best run that improve found on this map')
+    sh.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
+    sh.add_argument('--speed', type=float, default=1.0)
+    sh.add_argument('--port', type=int, default=P.PORT)
+    sh.set_defaults(fn=show)
     dv = sub.add_parser('drive', help='plan the line (drawn in the game), then drive it (serve must NOT run)')
     dv.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
     dv.add_argument('--speed', type=float, default=1.0)

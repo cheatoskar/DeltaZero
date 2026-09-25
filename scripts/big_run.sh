@@ -6,7 +6,14 @@ cd "$(dirname "$0")/.."
 source /venv/main/bin/activate
 END_UTC="${END_UTC:-16:05}"
 bash scripts/vast_run.sh env
-bash scripts/vast_run.sh data
+for try in 1 2 3 4 5; do            # HF resets connections now and then: repeat until complete
+  bash scripts/vast_run.sh data
+  nt=$(ls data/hf/traces/*.parquet 2>/dev/null | wc -l); nb=$(ls data/hf/blocks/*.parquet 2>/dev/null | wc -l)
+  echo "download try $try: $nt traces, $nb blocks"
+  [ "$nt" -ge 309 ] && [ "$nb" -ge 309 ] && break
+  sleep 20
+done
+[ "$nt" -ge 309 ] && [ "$nb" -ge 309 ] || { echo "INCOMPLETE download: $nt traces, $nb blocks - stopping"; exit 1; }
 echo "=== build shards, 8 workers ($(date +%H:%M:%S)) ==="
 [ -f data/ghost/shards/part0309/DONE ] || \
   python -u tmdriver.py ghost-build --traces data/hf/traces --blocks data/hf/blocks --workers 8 --stride 2

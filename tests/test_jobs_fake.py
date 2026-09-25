@@ -63,12 +63,12 @@ def main():
         time.sleep(0.05)
     assert game.accepts >= 3, f'serve did not reconnect after the job (accepts={game.accepts})'
     time.sleep(0.5)
-    game.press_job(P.JOB_RESIM, 0, 20, 5, P.JOB_PER_TICK)
+    game.press_job(P.JOB_RESIM, 0, 20, 90, P.JOB_PER_TICK)   # 90 minutes
     t.join(timeout=15)
     assert not t.is_alive(), 'serve did not return after two jobs'
     S.Context.policy = orig
     assert jobs[0][3:] == ['--device', 'auto', 'improve', '--rounds', '7', '--map', '10036840'], jobs[0]
-    assert jobs[1][3:] == ['--device', 'cpu', 'resim', '--source', 'bulk', '--replays', '5', '--hours', '5',
+    assert jobs[1][3:] == ['--device', 'cpu', 'resim', '--source', 'bulk', '--replays', '5', '--hours', '1.5',
                            '--per-tick'], jobs[1]
     game.stop_flag = True
     print('OK: job buttons hand the connection to the job and serve reconnects afterwards')

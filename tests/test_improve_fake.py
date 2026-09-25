@@ -35,13 +35,37 @@ def main():
     link = Link.connect(port=PORT, wait_s=5)
     from tmdriver.collect import MANIFEST
     tid = int(next(iter(json.loads(MANIFEST.read_text(encoding='utf-8'))['maps'])))
-    from tmdriver.improve import improve
-    hist = improve(link, track_id=tid, rounds=3, episodes=3, steps=5, bs=64)
+    import time
+    import tmdriver.improve as IM
+    orig_ft, calls = IM.fine_tune, []
+
+    def slow_fine_tune(*a, **k):      # longer than the plugin's 5 s step timeout: C_WAIT must hold it
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(7)
+        return orig_ft(*a, **k)
+
+    IM.fine_tune = slow_fine_tune
+    shown = []
+    orig_run = IM.GameSession.run
+
+    def run(self, eps, sim_only=True, batch=False, keep=False):
+        if any(isinstance(e, IM.Playback) for e in eps):
+            shown.append(sim_only)
+        return orig_run(self, eps, sim_only, batch, keep)
+
+    IM.GameSession.run = run
+    hist = IM.improve(link, track_id=tid, rounds=3, episodes=3, steps=5, bs=64)
+    IM.fine_tune, IM.GameSession.run = orig_ft, orig_run
+    assert shown and not any(shown), f'best runs must be shown visibly: {shown}'
+    print(f'best run shown {len(shown)}x (every new best + the final one)')
     print('history:', [(h['round'], h['greedy'], h['finished'], h['best_ms'], h['best_progress_m']) for h in hist])
     assert len(hist) == 3
     out = next((RUNS / 'improve').iterdir())
     assert (out / 'model.pt').exists() and (out / 'best_inputs.txt').exists()
     print((out / 'best_inputs.txt').read_text()[:200])
+    assert (out / 'best_run.json').exists()
+    IM.show_best(link, track_id=tid)          # the "Show best run" button
     game.stop_flag = True
     print('OK: improve ran rounds, fine-tuned, exported and played back')
 

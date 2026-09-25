@@ -228,13 +228,14 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
         for k in range(episodes):
             seed += 1
             eps.append(ImproveEpisode(policy, limit, temps[k % len(temps)], seed))
-        sess.status(f'Training {name}: Runde {rnd + 1}/{rounds}' +
-                    (f", beste Zeit {best['time_ms'] / 1000:.2f}s" if best and best['finished'] else ''))
-        res = sess.run(eps, sim_only=True)
+        sess.status(f'Training {name}: round {rnd + 1}/{rounds}' +
+                    (f", best {best['time_ms'] / 1000:.2f}s" if best and best['finished'] else ''))
+        res = sess.run(eps, sim_only=True, keep=True)      # the game stays frozen until release()
         elite = sorted(elite + res, key=score, reverse=True)[:elite_k]
         improved = best is None or score(elite[0]) > score(best)
         best = elite[0]
-        loss = fine_tune(policy, elite, steps, bs, lr, log)
+        with sess.hold():                                   # learning: game frozen, plugin kept waiting
+            loss = fine_tune(policy, elite, steps, bs, lr, log)
         fin = [r['time_ms'] for r in res if r['finished']]
         greedy = res[0]
         rec = {'round': rnd + 1, 'greedy': greedy['time_ms'] if greedy['finished'] else f"{greedy['progress_m']} m",
@@ -253,17 +254,56 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
         log(f"round {rnd + 1}: greedy {rec['greedy']}, {rec['finished']} finished, best {best_txt}"
             f"{' (new)' if improved else ''}, {rec['seconds']}s  [{stops}; greedy at 1 s: {rec['start_speed_kmh']} km/h]")
         if improved:
-            draw(link, best['path'])          # the best line so far, visible in the game
-            (out / 'best_inputs.txt').write_text(tmi_script(best['ticks']), encoding='utf-8')
-            torch.save(dict(torch.load(ckpt, map_location='cpu', weights_only=False),
-                            state_dict=policy.model.state_dict(), improved_on=uid,
-                            improve_best=best_txt), out / 'model.pt')
+            with sess.hold():
+                draw(link, best['path'])          # the best line so far, visible in the game
+                (out / 'best_inputs.txt').write_text(tmi_script(best['ticks']), encoding='utf-8')
+                (out / 'best_run.json').write_text(json.dumps({
+                    'map': name, 'uid': uid, 'time_ms': best['time_ms'], 'progress_m': best['progress_m'],
+                    'round': rnd + 1, 'ticks': best['ticks']}), encoding='utf-8')
+                torch.save(dict(torch.load(ckpt, map_location='cpu', weights_only=False),
+                                state_dict=policy.model.state_dict(), improved_on=uid,
+                                improve_best=best_txt), out / 'model.pt')
+            if show and best['ticks'] and rnd + 1 < rounds:
+                log(f'  showing the new best run ({best_txt}) in the game ...')
+                sess.status(f'New best {best_txt} (round {rnd + 1}): showing it')
+                sess.run([Playback(best['ticks'])], sim_only=False)    # ends the frozen state
+    sess.release()
     log(f'best {best_txt}; inputs -> {out / "best_inputs.txt"}, model -> {out / "model.pt"}')
     if show and best['ticks']:
-        sess.status(f'Beste Fahrt ({best_txt}) wird gezeigt')
+        sess.status(f'Best run ({best_txt}): showing it')
         sess.run([Playback(best['ticks'])], sim_only=False)
-    sess.status(f'Training fertig: beste {best_txt}')
+    sess.status(f'Training done: best {best_txt}. "Show best run" plays it again.')
     return history
+
+
+def show_best(link, track_id: Optional[int] = None, speed: float = 1.0, log=print):
+    """Play the best run that `improve` found on this map (runs/improve/<uid>/best_run.json)."""
+    from .evaluate import map_list
+    sess = GameSession(link, log)
+    if track_id is not None:
+        m = next((m for m in map_list(str(track_id))), None)
+        if m is None or not sess.load_map(m['map_file'], m['uid']):
+            raise SystemExit(f'map {track_id} did not load')
+    else:
+        t0 = time.monotonic()
+        while sess.map is None and time.monotonic() - t0 < 10:
+            try:
+                sess.next(timeout=1.0)
+            except TimeoutError:
+                pass
+        if sess.map is None:
+            raise SystemExit('no map announced: restart the race in the game, or pass --map <TMX id>')
+    f = OUT / safe(sess.map.uid) / 'best_run.json'
+    if not f.exists():
+        sess.status('No best run for this map yet: press "Train" first.')
+        raise SystemExit(f'no best run for {sess.map.name!r} yet ({f}); train on the map first')
+    run = json.loads(f.read_text(encoding='utf-8'))
+    txt = f"{run['time_ms'] / 1000:.2f}s" if run['time_ms'] else f"{run['progress_m']:.0f} m"
+    log(f"best run on {run['map']!r}: {txt} (round {run['round']})")
+    sess.status(f'Best run ({txt}): showing it')
+    link.speed(speed)
+    sess.run([Playback([tuple(t) for t in run['ticks']])], sim_only=False)
+    sess.status(f'Best run shown ({txt}).')
 
 
 def drive_preview(link, track_id: Optional[int] = None, speed: float = 1.0, ckpt: Path = None, log=print):
@@ -292,16 +332,16 @@ def drive_preview(link, track_id: Optional[int] = None, speed: float = 1.0, ckpt
     ref = reference_positions(uid, track_id or track_id_for(uid))
     policy.reset([b.__dict__ for b in sess.map.blocks], ref[0] if ref else None)
     draw(link, [])
-    sess.status('AI plant ihre Linie ...')
+    sess.status('AI is planning its line ...')
     plan = sess.run([ImproveEpisode(policy, 180000, 0.0, 0)], sim_only=True)[0]
-    txt = f"{plan['time_ms'] / 1000:.2f}s" if plan['finished'] else f"{plan['reason']} nach {plan['progress_m']:.0f} m"
+    txt = f"{plan['time_ms'] / 1000:.2f}s" if plan['finished'] else f"{plan['reason']} after {plan['progress_m']:.0f} m"
     log(f'plan: {txt}, {len(plan["path"])} path samples')
     draw(link, plan['path'])
-    sess.status(f'Geplante Linie ({txt}) eingezeichnet, AI faehrt jetzt')
+    sess.status(f'Planned line ({txt}) drawn, the AI drives it now')
     link.speed(speed)
     real = sess.run([ImproveEpisode(policy, 180000, 0.0, 0)], sim_only=False)[0]
     same = plan['ticks'] == real['ticks']
-    rtxt = f"{real['time_ms'] / 1000:.2f}s" if real['finished'] else f"{real['reason']} nach {real['progress_m']:.0f} m"
+    rtxt = f"{real['time_ms'] / 1000:.2f}s" if real['finished'] else f"{real['reason']} after {real['progress_m']:.0f} m"
     log(f'drive: {rtxt}; identical to the plan: {same}')
-    sess.status(f'AI: {rtxt} (Plan {txt}, {"identisch" if same else "ABWEICHUNG"})')
+    sess.status(f'AI: {rtxt} (plan {txt}, {"identical" if same else "DIFFERENT"})')
     return plan, real

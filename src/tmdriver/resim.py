@@ -150,7 +150,7 @@ def run_resim(link, only_missing: bool = True, max_replays: int = 5, log=print,
                 'analog': rep.uses_analog_steer, 'holdout': m['holdout']}, out_root))
         if not eps:
             continue
-        sess.status(f"Nachsimulation {k + 1}/{len(maps)}: {m['name']} ({len(eps)} Replays)")
+        sess.status(f"Re-simulation {k + 1}/{len(maps)}: {m['name']} ({len(eps)} replays)")
         if not sess.load_map(m['map_file'], m['uid']):
             log(f"SKIP {m['track_id']} {m['name']!r}: map did not load")
             continue
@@ -166,5 +166,5 @@ def run_resim(link, only_missing: bool = True, max_replays: int = 5, log=print,
             f"{sum(r['ticks'] for r in res)} ticks in {sum(r['wall_s'] for r in res):.1f}s | total "
             f"{n_ok}/{len(all_results)} exact, {len(all_results) / max(el, 1) * 3600:.0f} replays/h")
     n_ok = sum(r['exact'] for r in all_results)
-    sess.status(f'Nachsimulation fertig: {n_ok}/{len(all_results)} Replays exakt.')
+    sess.status(f'Re-simulation done: {n_ok}/{len(all_results)} replays exact.')
     return all_results

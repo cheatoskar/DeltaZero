@@ -40,6 +40,7 @@ class Link:
         self.owed = 0
         self.strict = False
         self._owed_lock = threading.Lock()   # the reader thread counts, the caller answers
+        self._send_lock = threading.Lock()   # flush vs. the wait-ping thread
 
     @classmethod
     def connect(cls, host: str = P.HOST, port: int = P.PORT, wait_s: float = 0.0,
@@ -166,5 +167,11 @@ class Link:
 
     def flush(self):
         if self.out:
-            self.sock.sendall(self.out)
+            with self._send_lock:
+                self.sock.sendall(self.out)
             self.out.clear()
+
+    def wait_ping(self):
+        """C_WAIT, sent at once (from GameSession.hold's thread): keeps the plugin waiting."""
+        with self._send_lock:
+            self.sock.sendall(struct.pack('<i', P.C_WAIT))

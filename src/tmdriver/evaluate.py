@@ -114,7 +114,7 @@ def run_eval(link, which: str = 'holdout', watch: bool = False, speed: float = 1
                 continue
             line, src = ref
         best = m['best_ms']
-        sess.status(f"Bewertung {k + 1}/{len(maps)}: {m['name']}")
+        sess.status(f"Evaluation {k + 1}/{len(maps)}: {m['name']}")
         if watch:
             link.speed(speed)
         blocks = [b.__dict__ for b in sess.map.blocks]
@@ -135,7 +135,7 @@ def run_eval(link, which: str = 'holdout', watch: bool = False, speed: float = 1
     summary = f"{len(fin)}/{len(results)} im Ziel"
     if fin:
         summary += f", im Mittel {sum(r['time_ms'] / r['best_ms'] for r in fin) / len(fin):.2f}x Bestzeit"
-    sess.status(f'Bewertung fertig: {summary}')
+    sess.status(f'Evaluation done: {summary}')
     out = RUNS / 'eval' / f"eval_{which.replace(',', '_')}_{time.strftime('%Y%m%d_%H%M%S')}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({'model': str(DRIVER_CKPT), 'results': results}, indent=1), encoding='utf-8')

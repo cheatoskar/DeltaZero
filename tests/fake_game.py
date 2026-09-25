@@ -309,7 +309,7 @@ class FakeGame(threading.Thread):
             return -1
         (t,) = self._take('<i')
         sizes = {P.C_ACTION: 12, P.C_SPEED: 4, P.C_RESTART: 0, P.C_SIMONLY: 4, P.C_SAVE: 4,
-                 P.C_REWIND: 4, P.C_MODE: 4, P.C_BENCH: 4}
+                 P.C_REWIND: 4, P.C_MODE: 4, P.C_BENCH: 4, P.C_WAIT: 0}
         if t == P.C_EXEC:
             if not self._fill(4, deadline):
                 return -1
@@ -457,6 +457,8 @@ class FakeGame(threading.Thread):
             typ = self.read_message(True, deadline)
             if typ == P.C_ACTION:
                 break
+            if typ == P.C_WAIT:
+                deadline = time.monotonic() + 5.0     # like the plugin: Python is busy, keep waiting
             if typ == -1:
                 raise RuntimeError('python timed out')
         if self.play_armed:

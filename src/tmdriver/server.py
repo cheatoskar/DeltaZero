@@ -15,15 +15,16 @@ from .tasks import Context, Driver, Recorder, SelfTest, Task
 
 TASKS = {P.MODE_RECORD: Recorder, P.MODE_DRIVE: Driver, P.MODE_TEST: SelfTest}
 ROOT = Path(__file__).resolve().parents[2]
-JOB_NAMES = {P.JOB_DRIVE: 'Linie planen + fahren', P.JOB_TRAIN: 'KI trainieren', P.JOB_RESIM: 'Nachsimulieren'}
+JOB_NAMES = {P.JOB_DRIVE: 'Drive', P.JOB_TRAIN: 'Train', P.JOB_RESIM: 'Re-simulate replays', P.JOB_SHOW: 'Show best run'}
 
 
 class JobRequest(Exception):
     """A tool button: the server hands the game connection to a job in its own console."""
 
-    def __init__(self, job, track_id, rounds, hours, flags):
+    def __init__(self, job, track_id, rounds, minutes, flags):
         super().__init__(JOB_NAMES.get(job, job))
-        self.job, self.track_id, self.rounds, self.hours, self.flags = job, track_id, rounds, hours, flags
+        self.job, self.track_id, self.rounds, self.flags = job, track_id, rounds, flags
+        self.hours = round(max(minutes, 6) / 60.0, 2)
 
     def command(self):
         cmd = [sys.executable, '-u', str(ROOT / 'tmdriver.py'),
@@ -34,8 +35,10 @@ class JobRequest(Exception):
         if self.job == P.JOB_TRAIN:
             return cmd + ['improve', '--rounds', str(max(1, self.rounds))] + m
         if self.job == P.JOB_RESIM:
-            return cmd + ['resim', '--source', 'bulk', '--replays', '5', '--hours', str(max(1, self.hours))] + \
+            return cmd + ['resim', '--source', 'bulk', '--replays', '5', '--hours', str(self.hours)] + \
                 (['--per-tick'] if self.flags & P.JOB_PER_TICK else [])
+        if self.job == P.JOB_SHOW:
+            return cmd + ['show'] + m
         raise ValueError(f'unknown job {self.job}')
 
 
@@ -75,7 +78,7 @@ class Server:
                 raise RuntimeError(f'plugin protocol {version}, python expects {P.PROTOCOL}: '
                                    f'copy the current plugin into TMInterface/Plugins')
             self.log('plugin connected')
-            link.status('Python verbunden. Ablauf: 1) Selbsttest  2) Aufnehmen  3) AI fahren')
+            link.status('Python connected. Pick a map, then Drive or Train.')
             link.flush()
 
         elif kind == P.P_MAP:
@@ -95,7 +98,7 @@ class Server:
                 self.ctx.policy()   # load before the race starts: steps must be answered fast
             self.task = cls(link, self.ctx) if cls else None
             if self.task is None:
-                link.status('Gestoppt.')
+                link.status('Stopped.')
                 link.flush()
 
         elif kind == P.P_JOB:
@@ -137,7 +140,7 @@ def serve(host: str = P.HOST, port: int = P.PORT, wait_s: float = 3600.0, spawn=
             Server(link).run()
         except JobRequest as j:
             job = j
-            link.status(f'{j}: laeuft in einem eigenen Terminal-Fenster.')
+            link.status(f'{j}: running in its own console window.')
             link.flush()
         except ConnectionError as e:
             print(f'connection lost: {e}; reconnecting')

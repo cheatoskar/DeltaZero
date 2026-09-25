@@ -12,7 +12,7 @@
 //   DRIVE   a STEP is sent every tick and the plugin waits for Python's ACTION
 //   TEST    like DRIVE; Python runs the self test (simulation-only speed, determinism)
 
-const int PROTOCOL = 7;
+const int PROTOCOL = 8;
 const string HOST = "127.0.0.1";
 const uint16 PORT = 8478;
 const uint STEP_TIMEOUT_MS = 5000;
@@ -25,9 +25,13 @@ const int P_UI = 4;
 const int P_BENCH = 5;
 const int P_PING = 6;     // heartbeat (idle only): a failed write reveals a dead client
 const int P_TREC = 7;     // batch playback: one tick's state (STEP layout), no answer expected
-const int P_JOB = 9;      // a tool button: int job (1 drive, 2 train, 3 re-simulate), int TMX id (0 = the
-                          // current map), int rounds, int hours, int flags (1 GPU, 2 per-tick re-simulation).
-                          // The Python server opens the job in its own console window.
+const int P_JOB = 9;      // a tool button: int job (1 drive, 2 train, 3 re-simulate, 4 show best run),
+                          // int TMX id (0 = the current map), int rounds, int minutes, int flags
+                          // (1 GPU, 2 per-tick re-simulation). The Python server opens the job in its own console.
+const int JOB_DRIVE = 1;
+const int JOB_TRAIN = 2;
+const int JOB_RESIM = 3;
+const int JOB_SHOW = 4;
 const int P_TEND = 8;     // batch playback finished: int reason (0 end of inputs, 1 finish, 2 frozen time), int race time
 
 // python -> plugin
@@ -47,6 +51,8 @@ const int C_PLAY = 21;    // int n, n x (int steer, int gas, int bits) for race 
 const int MAX_PLAY = 60000;
 const int C_DRAW = 20;    // int n, n x (float x, y, z), float size: show a path as trigger boxes (n = 0 clears)
 const int MAX_DRAW = 600;
+const int C_WAIT = 22;    // (during a STEP) Python is busy, e.g. learning between rounds: extend the timeout.
+                          // The game stays frozen in the step, as in a bruteforce run.
 
 const int MODE_IDLE = 0;
 const int MODE_RECORD = 1;
@@ -60,13 +66,13 @@ Net::Socket@ server = null;
 Net::Socket@ client = null;
 
 int mode = MODE_IDLE;
-string status = "Starte TMDriver_starten.bat im TMDriverAI-Ordner";
+string status = "Start TMDriver_starten.bat in the TMDriverAI folder.";
 float uiSpeed = 1.0f;
 
-// tool settings (the "KI-Werkzeuge" section of the window)
+// tool settings
 int jobMap = 0;
 int jobRounds = 20;
-int jobHours = 3;
+float jobHours = 3.0f;
 bool jobGpu = true;
 bool jobPerTick = false;
 
@@ -136,10 +142,10 @@ void OnDisabled()
 
 string ModeName(int m)
 {
-    if (m == MODE_RECORD) return "Aufnahme";
-    if (m == MODE_DRIVE) return "AI faehrt";
-    if (m == MODE_TEST) return "Selbsttest";
-    return "bereit";
+    if (m == MODE_RECORD) return "recording";
+    if (m == MODE_DRIVE) return "AI driving (live)";
+    if (m == MODE_TEST) return "job running";
+    return "ready";
 }
 
 // ---------------------------------------------------------------- connection
@@ -183,9 +189,18 @@ void SendJob(int job)
     client.Write(job);
     client.Write(jobMap);
     client.Write(jobRounds);
-    client.Write(jobHours);
+    client.Write(int(jobHours * 60.0f + 0.5f));
     client.Write(flags);
-    status = "Job gestartet: ein Terminal-Fenster oeffnet sich ...";
+    status = "Job started: a console window opens ...";
+}
+
+void Tip(const string&in text)
+{
+    if (UI::IsItemHovered()) {
+        UI::BeginTooltip();
+        UI::Text(text);
+        UI::EndTooltip();
+    }
 }
 
 void SendUi(int m)
@@ -284,7 +299,7 @@ int ReadMessage(SimulationManager@ simManager, uint64 deadline)
         if (!WaitBytes(4, deadline)) return -1;
         int n = client.ReadInt32();
         if (n < 1 || n > MAX_PLAY) {
-            Drop("PLAY mit " + n + " Ticks - Protokoll passt nicht");
+            Drop("PLAY with " + n + " ticks: protocol mismatch");
             return -1;
         }
         playSteer.Resize(n);
@@ -302,7 +317,7 @@ int ReadMessage(SimulationManager@ simManager, uint64 deadline)
         if (!WaitBytes(4, deadline)) return -1;
         int n = client.ReadInt32();
         if (n < 0 || n > MAX_DRAW) {
-            Drop("DRAW mit " + n + " Punkten - Protokoll passt nicht");
+            Drop("DRAW with " + n + " points: protocol mismatch");
             return -1;
         }
         if (!WaitBytes(uint(n * 12 + 4), deadline)) return -1;
@@ -327,8 +342,10 @@ int ReadMessage(SimulationManager@ simManager, uint64 deadline)
             benchTicks = n;
             benchStart = Time::Now;
         }
+    } else if (type == C_WAIT) {
+        // no payload: the caller extends its deadline
     } else {
-        Drop("Unbekannte Nachricht " + type + " - Protokoll passt nicht");
+        Drop("Unknown message " + type + ": protocol mismatch");
         return -1;
     }
     return type;
@@ -542,11 +559,21 @@ void OnRunStep(SimulationManager@ simManager)
 
     if (playing && !RunPlayback(simManager, t)) return;
 
+    // Commands between steps (mode, status, drawing) normally arrive in Render(), which the
+    // game does not call while its window is minimized: read them here as well.
+    while (client !is null && client.Available >= 4) {
+        if (ReadMessage(null, Time::Now + 500) == -1) {
+            if (client !is null) Drop("Incomplete message from Python");
+            break;
+        }
+    }
+    if (client is null) return;
+
     if (mode == MODE_IDLE || t < -10 || finishSent) return;
 
     bool finished = simManager.PlayerInfo.RaceFinished;
     if (!SendStep(simManager)) {
-        Drop("Verbindung zu Python verloren");
+        Drop("Lost the connection to Python");
         return;
     }
     if (finished) finishSent = true;
@@ -557,8 +584,9 @@ void OnRunStep(SimulationManager@ simManager)
     while (client !is null) {
         int type = ReadMessage(simManager, deadline);
         if (type == C_ACTION) break;
+        if (type == C_WAIT) deadline = Time::Now + STEP_TIMEOUT_MS;
         if (type == -1) {
-            if (client !is null) Drop("Python antwortet nicht (Timeout)");
+            if (client !is null) Drop("Python did not answer (timeout)");
             simManager.SimulationOnly = false;
             ReleaseInputs(simManager);
             break;
@@ -592,7 +620,7 @@ bool RunPlayback(SimulationManager@ simManager, int t)
         return true;
     }
     if (!SendStep(simManager, P_TREC)) {
-        Drop("Verbindung zu Python verloren");
+        Drop("Lost the connection to Python");
         playing = false;
         return false;
     }
@@ -634,7 +662,7 @@ void Render()
             lastPing = Time::Now;
             client.NoDelay = true;
             sentUid = "";
-            status = "Python verbunden";
+            status = "Python connected";
             client.Write(P_HELLO);
             client.Write(PROTOCOL);
             log("TMDriver: Python connected (" + client.RemoteIP + ")", Severity::Success);
@@ -645,14 +673,14 @@ void Render()
     if (client !is null && Time::Now - lastPing > 1000) {
         lastPing = Time::Now;
         if (!client.Write(P_PING)) {
-            Drop("Verbindung zu Python verloren");
+            Drop("Lost the connection to Python");
         }
     }
 
     // Status text and mode changes can arrive between races.
     while (client !is null && client.Available >= 4) {
         if (ReadMessage(null, Time::Now + 500) == -1) {
-            if (client !is null) Drop("Python-Nachricht unvollstaendig");
+            if (client !is null) Drop("Incomplete message from Python");
             break;
         }
     }
@@ -664,39 +692,62 @@ void Render()
     }
     pendingExec.Resize(0);
 
-    if (UI::Begin("TMDriver AI")) {
-        UI::Text(client is null ? "Python: nicht verbunden" : "Python: verbunden");
-        UI::Text("Modus: " + ModeName(mode));
+    if (UI::Begin("DeltaZero")) {
+        UI::Text(client is null ? "Python: not connected" : "Python: connected (" + ModeName(mode) + ")");
         UI::TextWrapped(status);
+        if (client is null) {
+            UI::TextWrapped("Start 'TMDriver_starten.bat' in the TMDriverAI folder first.");
+        }
         UI::Separator();
-        UI::BeginDisabled(client is null);
-        if (UI::Button("Aufnehmen (selbst fahren)")) StartMode(MODE_RECORD);
+        jobMap = UI::InputInt("Map (TMX id)", jobMap, 0);
+        if (jobMap < 0) jobMap = 0;
+        Tip("0 = the map that is loaded now. Otherwise the TMX id, e.g. 10036840 for lolsport.");
+        jobGpu = UI::Checkbox("Use GPU (CUDA)", jobGpu);
+        Tip("Off = CPU. The laptop has no CUDA GPU.");
+        UI::BeginDisabled(client is null || mode != MODE_IDLE);
+        if (UI::Button("Drive")) SendJob(JOB_DRIVE);
+        Tip("The AI drives the map once without rendering (the game freezes briefly), draws its "
+            "line as small boxes, then drives it visibly.");
         UI::SameLine();
-        if (UI::Button("AI fahren")) StartMode(MODE_DRIVE);
-        if (UI::Button("Selbsttest")) StartMode(MODE_TEST);
-        UI::SameLine();
-        if (UI::Button("Stop")) StartMode(MODE_IDLE);
-        uiSpeed = UI::SliderFloat("Tempo", uiSpeed, 1.0f, 10.0f, "%.1fx");
+        if (UI::Button("Show best run")) SendJob(JOB_SHOW);
+        Tip("Plays the best run that 'Train' found on this map.");
+        jobRounds = UI::SliderInt("Rounds", jobRounds, 1, 200);
+        Tip("Training rounds. Each round: 7 runs (1 normal + 6 with random variations), then the AI "
+            "learns from the best ones. The game stays frozen while it trains.");
+        if (UI::Button("Train")) SendJob(JOB_TRAIN);
+        Tip("The AI practises this map and gets faster. Every new best run is shown in the game, "
+            "then training continues.");
         UI::EndDisabled();
-        UI::Separator();
-        if (UI::CollapsingHeader("KI-Werkzeuge")) {
-            jobMap = UI::InputInt("TMX-ID", jobMap, 0);
-            if (jobMap < 0) jobMap = 0;
-            jobRounds = UI::SliderInt("Runden", jobRounds, 1, 200);
-            jobHours = UI::SliderInt("Stunden", jobHours, 1, 24);
-            jobGpu = UI::Checkbox("GPU (CUDA)", jobGpu);
-            jobPerTick = UI::Checkbox("Nachsim. pro Tick", jobPerTick);
+        UI::SameLine();
+        UI::BeginDisabled(client is null);
+        if (UI::Button("Stop")) StartMode(MODE_IDLE);
+        Tip("Stops the running job or mode.");
+        UI::EndDisabled();
+        UI::TextWrapped("Each button opens a console with live progress.");
+
+        if (UI::CollapsingHeader("Data: re-simulate replays")) {
+            jobHours = UI::SliderFloat("Hours", jobHours, 0.1f, 24.0f, "%.1f h");
+            jobPerTick = UI::Checkbox("Per-tick mode (slower, verified)", jobPerTick);
+            Tip("Default: the plugin plays each replay's inputs itself (batch mode). Per tick: Python "
+                "answers every tick; use it if batch mode reports runs that are not exact.");
             UI::BeginDisabled(client is null || mode != MODE_IDLE);
-            if (UI::Button("Linie planen + fahren")) SendJob(1);
-            UI::SameLine();
-            if (UI::Button("KI trainieren")) SendJob(2);
-            if (UI::Button("Nachsimulieren")) SendJob(3);
+            if (UI::Button("Re-simulate replays")) SendJob(JOB_RESIM);
+            Tip("Plays the downloaded TMX replays in the game and saves the full physics state "
+                "(data/resim). Stops after the hours above.");
             UI::EndDisabled();
-            UI::TextWrapped("TMX-ID 0 = die Map, die gerade laeuft. Jeder Knopf oeffnet ein Terminal mit Live-Ausgabe. Das Spielbild steht "
-                            "still, solange die KI simuliert. Stop beendet den Job.");
-            if (client is null) {
-                UI::TextWrapped("Zuerst 'TMDriver_starten.bat' im TMDriverAI-Ordner starten.");
-            }
+        }
+        if (UI::CollapsingHeader("Advanced")) {
+            UI::BeginDisabled(client is null);
+            if (UI::Button("Record (drive yourself)")) StartMode(MODE_RECORD);
+            Tip("Records your own run as a reference line for the AI.");
+            UI::SameLine();
+            if (UI::Button("Self-test")) StartMode(MODE_TEST);
+            Tip("Checks the game conventions (input signs, replay alignment). Run once per install.");
+            if (UI::Button("AI drive (live)")) StartMode(MODE_DRIVE);
+            Tip("The AI drives in real time, without planning or drawing a line.");
+            uiSpeed = UI::SliderFloat("Speed", uiSpeed, 1.0f, 10.0f, "%.1fx");
+            Tip("Game speed for 'AI drive (live)'.");
+            UI::EndDisabled();
         }
     }
     UI::End();

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-PROTOCOL = 7
+PROTOCOL = 8
 HOST = '127.0.0.1'
 PORT = 8478
 
@@ -21,7 +21,7 @@ P_BENCH = 5   # int ticks, int elapsed_ms, int race_time
 P_PING = 6    # -  (heartbeat while idle; ignore)
 P_TREC = 7    # STEP struct: one tick of batch playback (no answer)
 P_JOB = 9     # int job, int TMX id (0 = current map), int rounds, int hours, int flags (tool button)
-JOB_DRIVE, JOB_TRAIN, JOB_RESIM = 1, 2, 3
+JOB_DRIVE, JOB_TRAIN, JOB_RESIM, JOB_SHOW = 1, 2, 3, 4   # P_JOB: ..., int minutes, ...
 JOB_GPU, JOB_PER_TICK = 1, 2
 P_TEND = 8    # int reason (0 end of inputs, 1 finish, 2 frozen race time), int race time
 
@@ -38,6 +38,7 @@ C_BENCH = 18    # int ticks   (plugin runs them with gas held, without talking t
 C_EXEC = 19     # str console command, executed in the plugin's Render() (e.g. 'map <file>')
 C_DRAW = 20     # int n, n x (float x, y, z), float size: path as TMInterface trigger boxes (n = 0 clears)
 MAX_DRAW = 600
+C_WAIT = 22     # (during a STEP) Python is busy: the plugin extends its timeout, the game stays frozen
 C_PLAY = 21     # int n, n x (int steer, int gas, int bits) for race times 0, 10, ...; send before the ACTION.
                 # The plugin plays them from the next tick (P_TREC each), then P_TEND + a normal STEP
 MAX_PLAY = 60000

@@ -6,6 +6,7 @@ buttons, a session drives the game itself: it loads a map with the TMInterface `
 console command, restarts, saves the start state, and runs one episode after another,
 rewinding to the start between them.
 """
+import contextlib
 import json
 import os
 import queue
@@ -82,6 +83,7 @@ class GameSession:
             link._last_map = None
             threading.Thread(target=self._pump, args=(link,), daemon=True).start()
         self.q = link._pump_q
+        self._held = None      # the start STEP while the plugin is kept waiting (run(keep=True))
         link.strict = True     # one ACTION per STEP, checked (see Link.owed)
         # No "Press any key to continue" / opponent screens between map loads (TMInterface
         # variable; without it cheatoskar had to press Enter on every map).
@@ -177,17 +179,76 @@ class GameSession:
 
     # ------------------------------------------------------------------ episodes
 
-    def run(self, episodes: List[Episode], sim_only: bool = True, batch: bool = False) -> List[dict]:
+    @contextlib.contextmanager
+    def hold(self, every_s: float = 1.0):
+        """While the plugin is kept waiting in a STEP (after run(keep=True)), Python may work
+        (e.g. learn between rounds): C_WAIT pings keep the plugin from timing out, and the game
+        stays frozen, even when its window is minimized."""
+        if self._held is None:
+            yield
+            return
+        stop = threading.Event()
+
+        def ping():
+            while not stop.wait(every_s):
+                try:
+                    self.link.wait_ping()
+                except OSError:
+                    return
+
+        t = threading.Thread(target=ping, daemon=True)
+        t.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            t.join()
+
+    def release(self):
+        """End a kept session: back to the start, rendering on, plugin idle."""
+        if self._held is None:
+            return
+        link = self.link
+        link.rewind(0)
+        link.sim_only(False)
+        link.speed(1.0)
+        link.mode(P.MODE_IDLE)
+        link.action(0, 0, 0)
+        self._held = None
+
+    def run(self, episodes: List[Episode], sim_only: bool = True, batch: bool = False,
+            keep: bool = False) -> List[dict]:
         """Restart the race, save its start (race time 0), then run each episode from that
         state, rewinding in between. Every STEP is answered with exactly one ACTION.
-        batch: episodes with `plan()` are played by the plugin (no round trip per tick)."""
+        batch: episodes with `plan()` are played by the plugin (no round trip per tick).
+        keep: do not answer the last STEP: the game stays frozen at it (use hold() while
+        working, then run(...) again to continue from the saved start, or release())."""
         link = self.link
-        link.mode(P.MODE_TEST)
-        link.flush()
         results: List[dict] = []
         i, ep, start = 0, None, None
         uid = self.map.uid if self.map else None
         phase = 'first'
+        if self._held is not None:
+            if not sim_only:
+                self.release()                       # a visible run needs a fresh start
+            else:
+                start, self._held = self._held, None
+                ep = episodes[0]
+                link.rewind(0)
+                ep.begin(start)
+                a = ep.act(start)
+                if batch and a is not None:
+                    self._play(ep)
+                phase = 'run'
+                if a is not None:
+                    link.action(*a)
+                else:
+                    # (an episode that ends at once: handled by the loop below on the next STEP
+                    # would be wrong; answer it here like the loop does)
+                    return self._finish_now(episodes, results, ep, start, keep, batch)
+        if phase == 'first':
+            link.mode(P.MODE_TEST)
+            link.flush()
         while True:
             kind, st = self.next(timeout=self.STEP_TIMEOUT_S)
             if kind == P.P_UI and st[0] == P.MODE_IDLE:
@@ -236,6 +297,10 @@ class GameSession:
                 results.append(ep.result())
                 i += 1
                 if i == len(episodes):
+                    if keep and sim_only:
+                        self._held = start          # leave this STEP unanswered: game stays frozen
+                        link.flush()
+                        return results
                     # Back to the start before rendering resumes: the game must never see a
                     # finished race, or it shows the medal screen and waits for a key press.
                     link.rewind(0)
@@ -251,6 +316,17 @@ class GameSession:
                 if batch and a is not None:
                     self._play(ep)
             link.action(*a)
+
+    def _finish_now(self, episodes, results, ep, start, keep, batch):
+        """Continue a kept session whose first episode ended on the start STEP itself."""
+        self._held = start
+        rest = episodes[1:]
+        results.append(ep.result())
+        if rest:
+            return results + self.run(rest, sim_only=True, batch=batch, keep=keep)
+        if not keep:
+            self.release()
+        return results
 
     def _play(self, ep: Episode):
         plan = getattr(ep, 'plan', None)
