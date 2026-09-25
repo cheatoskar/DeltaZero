@@ -1,4 +1,4 @@
-# TMDriverAI
+# DeltaZero
 
 An AI that drives **TrackMania Nations Forever** maps it has never seen, and then gets
 faster on a map by practising it, through a TMInterface plugin.
@@ -21,6 +21,9 @@ faster on a map by practising it, through a TMInterface plugin.
 > class in 78 % of held-out samples and the right steering direction in 80 %. First
 > in-game runs finish maps. See [docs/STUFEN.md](docs/STUFEN.md) (German) for the
 > roadmap.
+
+The Python package is still called `tmdriver` and the plugin `TMDriver` (the project's
+working name).
 
 ## How it works
 
