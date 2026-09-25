@@ -1,0 +1,11 @@
+data/
+runs/
+__pycache__/
+*.pyc
+*.pt
+# third-party binaries (LZO, GPL): shipped with a local install, or use `pip install python-lzo`
+src/tmdriver/gbx/lib/*.dll
+*.flag
+*.log
+.vscode/
+.idea/
