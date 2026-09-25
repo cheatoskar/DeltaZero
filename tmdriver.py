@@ -119,7 +119,7 @@ def pretrain(args):
     run(hours=args.hours, bs=args.bs, lr=args.lr, d=args.d, layers=args.layers, heads=args.heads,
         workers=args.workers, max_parts=args.max_parts, init=args.init, compile_model=args.compile,
         eval_min=args.eval_min, val_n=args.val_n, shards=args.shards, orient=args.orient,
-        orient_drop=args.orient_drop, out=args.out)
+        orient_drop=args.orient_drop, out=args.out, seed=args.seed)
 
 
 def improve(args):
@@ -217,6 +217,7 @@ def main():
     pt.add_argument('--orient', action='store_true', help='use the car orientation (replay data)')
     pt.add_argument('--orient-drop', type=float, default=0.3)
     pt.add_argument('--out', default='', help='checkpoint folder (default runs/ghost)')
+    pt.add_argument('--seed', type=int, default=0, help='data order (use another one when continuing with --init)')
     pt.set_defaults(fn=pretrain)
     im = sub.add_parser('improve', help='the model practises one map and gets faster (serve must NOT run)')
     im.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
