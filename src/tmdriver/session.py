@@ -69,6 +69,22 @@ class Episode:
         raise NotImplementedError
 
 
+class GasProbe(Episode):
+    """Full throttle for one second from the race start: does the car move?"""
+
+    def begin(self, start):
+        self.kmh = 0
+
+    def act(self, st):
+        if st.race_time >= 1000 or st.finished:
+            self.kmh = int(st.display_speed)
+            return None
+        return 0, 0, P.UP
+
+    def result(self):
+        return {'kmh': self.kmh}
+
+
 class GameSession:
     MAP_TIMEOUT_S = 90.0   # load screens + shadow computation can take long on big maps
     STEP_TIMEOUT_S = 30.0
@@ -313,6 +329,24 @@ class GameSession:
                 if batch and a is not None:
                     self._play(ep)
             link.action(*a)
+
+    def ensure_drivable(self, tries: int = 6, wait_s: float = 3.0) -> bool:
+        """Right after a map load the race can be saved and simulated while the car cannot move
+        yet (seen twice on 2026-09-25: every run of the first rounds stayed at 0 m). Probe with
+        one second of full throttle; if the car does not move, let the game run normally for a
+        few seconds and try again."""
+        for k in range(tries):
+            kmh = self.run([GasProbe()], sim_only=True)[0]['kmh']
+            if kmh >= 5:
+                if k:
+                    self.log(f'  the car moves now ({kmh} km/h after 1 s of throttle)')
+                return True
+            self.log(f'  the car does not move yet ({kmh} km/h after 1 s of throttle): '
+                     f'letting the game run for {wait_s:.0f} s ...')
+            self.status('Waiting for the race to become drivable ...')
+            time.sleep(wait_s)
+        self.log('  WARNING: the car still does not move. Click into the game or press Enter, then retry.')
+        return False
 
     def _begin(self, ep: Episode, start: P.Step):
         """Rewind to the episode's start: slot 0 (the race start) or, for an episode with

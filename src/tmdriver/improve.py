@@ -243,6 +243,58 @@ def tmi_script(ticks) -> str:
     return '\n'.join(lines) + '\n'
 
 
+class Pace:
+    """Progress over time of the best plan so far: a plan that is far behind it for a while is
+    stopped early (drive only needs the best plan, so hopeless ones need not be finished)."""
+
+    def __init__(self, behind_m: float = 60.0, grace_ms: int = 3000):
+        self.curve, self.score, self.behind_m, self.grace_ms = {}, None, behind_m, grace_ms
+
+    def offer(self, r: dict, curve: dict):
+        if self.score is None or score(r) > self.score:
+            self.score, self.curve = score(r), curve
+
+    def hopeless(self, t: int, progress: float) -> bool:
+        ref = self.curve.get(t // 100 * 100)
+        return ref is not None and t > self.grace_ms and progress < ref - self.behind_m
+
+
+class PlanEpisode(ImproveEpisode):
+    """An ImproveEpisode for drive: reports itself when done and gives up when hopeless."""
+
+    def __init__(self, policy, limit_ms, temp, seed, k, n, pace: Pace, log=print):
+        super().__init__(policy, limit_ms, temp, seed)
+        self.k, self.n, self.pace, self.log = k, n, pace, log
+
+    def begin(self, start):
+        super().begin(start)
+        self.curve, self.behind_since = {}, None
+
+    def act(self, st):
+        a = super().act(st)
+        if a is None:
+            return None
+        t, prog = st.race_time, self.policy.progress_m
+        if t >= 0 and t % 100 == 0:
+            self.curve[t] = prog
+            if self.pace.hopeless(t, prog):
+                self.behind_since = self.behind_since if self.behind_since is not None else t
+                if t - self.behind_since >= 2000:
+                    self.reason = 'far behind'
+                    return None
+            else:
+                self.behind_since = None
+        return a
+
+    def result(self):
+        r = super().result()
+        self.pace.offer(r, self.curve)
+        txt = f"finish {r['time_ms'] / 1000:.2f}s" if r['finished'] else f"{r['progress_m']:.0f} m ({r['reason']})"
+        kind = 'greedy' if self.temp == 0 else f'temperature {self.temp}'
+        self.log(f'  plan {self.k}/{self.n} ({kind}): {txt}')
+        return r
+
+
 class Playback(Episode):
     """Plays a recorded tick sequence back (to show the best run), recording like an
     ImproveEpisode so the result can be compared with the plan."""
@@ -273,7 +325,7 @@ class Playback(Episode):
 
 def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: int = 6, elite_k: int = 3,
             steps: int = 12, bs: int = 64, lr: float = 1e-4, temps=(0.4, 0.7, 1.0), show: bool = True,
-            ckpt: Path = None, branch: int = 8, log=print):
+            ckpt: Path = None, branch: int = 8, seed: Optional[int] = None, log=print):
     """branch > 0: from round 2 on, `branch` of the runs start from a state saved shortly before
     the best run got stuck (or anywhere along it once it finishes), so the attempts are spent on
     the hard part instead of re-driving the start every time."""
@@ -307,12 +359,14 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
     limit = int(2 * best_ms + 10000) if best_ms else 180000
     log(f"improve {name!r}: {rounds} rounds x {episodes + 1} runs, line: {ref[1] if ref else 'none'}, "
         f"model {ckpt}")
+    sess.ensure_drivable()
 
     elite: List[dict] = []
     best: Optional[dict] = None
     history = []
-    seed = 0
-    brng = np.random.default_rng(12345)
+    seed = int(np.random.default_rng().integers(1_000_000)) if seed is None else seed
+    log(f'seed {seed}')
+    brng = np.random.default_rng(seed + 12345)
     for rnd in range(rounds):
         t0 = time.perf_counter()
         eps = [ImproveEpisode(policy, limit, 0.0, seed)]
@@ -363,7 +417,7 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
                 (out / 'best_inputs.txt').write_text(tmi_script(best['ticks']), encoding='utf-8')
                 (out / 'best_run.json').write_text(json.dumps({
                     'map': name, 'uid': uid, 'time_ms': best['time_ms'], 'progress_m': best['progress_m'],
-                    'round': rnd + 1, 'ticks': best['ticks']}), encoding='utf-8')
+                    'round': rnd + 1, 'ticks': best['ticks'], 'path': best['path']}), encoding='utf-8')
                 torch.save(dict(torch.load(ckpt, map_location='cpu', weights_only=False),
                                 state_dict=policy.model.state_dict(), improved_on=uid,
                                 improve_best=best_txt), out / 'model.pt')
@@ -404,6 +458,7 @@ def show_best(link, track_id: Optional[int] = None, speed: float = 1.0, log=prin
     run = json.loads(f.read_text(encoding='utf-8'))
     txt = f"{run['time_ms'] / 1000:.2f}s" if run['time_ms'] else f"{run['progress_m']:.0f} m"
     log(f"best run on {run['map']!r}: {txt} (round {run['round']})")
+    sess.ensure_drivable()
     sess.status(f'Best run ({txt}): showing it')
     link.speed(speed)
     sess.run([Playback([tuple(t) for t in run['ticks']])], sim_only=False)
@@ -438,9 +493,13 @@ def drive_preview(link, track_id: Optional[int] = None, speed: float = 1.0, ckpt
     ref = reference_positions(uid, track_id or track_id_for(uid))
     policy.reset([b.__dict__ for b in sess.map.blocks], ref[0] if ref else None)
     draw(link, [])
-    sess.status(f'AI is planning its line ({plans} tries) ...')
-    eps = [ImproveEpisode(policy, 180000, 0.0, 0)] + \
-        [ImproveEpisode(policy, 180000, temps[k % len(temps)], k + 1) for k in range(plans - 1)]
+    sess.ensure_drivable()
+    sess.status(f'AI is planning its line ({plans} tries, the game is frozen meanwhile) ...')
+    log(f'planning {plans} runs (the game is frozen meanwhile) ...')
+    pace, seed = Pace(), int(np.random.default_rng().integers(1_000_000))
+    eps = [PlanEpisode(policy, 180000, 0.0, seed, 1, plans, pace, log)] + \
+        [PlanEpisode(policy, 180000, temps[k % len(temps)], seed + k + 1, k + 2, plans, pace, log)
+         for k in range(plans - 1)]
     res = sess.run(eps, sim_only=True)
     plan = max(res, key=score)
     fmt = lambda r: f"{r['time_ms'] / 1000:.2f}s" if r['finished'] else f"{r['progress_m']:.0f} m"

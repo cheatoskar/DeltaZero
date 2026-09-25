@@ -125,7 +125,7 @@ def pretrain(args):
 def improve(args):
     from tmdriver.improve import improve as run
     run(_link(args), track_id=args.map, rounds=args.rounds, episodes=args.episodes, show=not args.no_show,
-        ckpt=args.model or None, branch=args.branch)
+        ckpt=args.model or None, branch=args.branch, seed=args.seed)
 
 
 def show(args):
@@ -226,6 +226,7 @@ def main():
     im.add_argument('--model', default='', help='checkpoint (default: as serve)')
     im.add_argument('--branch', type=int, default=8,
                     help='runs per round that start shortly before where the best run got stuck (0 = off)')
+    im.add_argument('--seed', type=int, default=None, help='random seed (default: a new one each time)')
     im.add_argument('--no-show', action='store_true', help='do not show new best runs in the game')
     im.add_argument('--port', type=int, default=P.PORT)
     im.set_defaults(fn=improve)
