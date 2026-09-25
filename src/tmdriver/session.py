@@ -114,6 +114,10 @@ class GameSession:
         self._held = None      # the start STEP while the plugin is kept waiting (run(keep=True))
         self.focus = True      # bring the game window to the front for map loads (main instance)
         self.stop = None       # a threading.Event: when set, run() ends its episodes early
+        # C_HOLD: episodes that allow it (supports_hold) hold each ACTION this many ticks, so the
+        # plugin asks Python once per decision instead of every tick. Off (1) until verified in
+        # the real game; TMDRIVER_HOLD=5 (or --hold) turns it on.
+        self.hold_ticks = int(os.environ.get('TMDRIVER_HOLD', '1') or 1)
         link.strict = True     # one ACTION per STEP, checked (see Link.owed)
         # No "Press any key to continue" / opponent screens between map loads (TMInterface
         # variable; without it cheatoskar had to press Enter on every map).
@@ -314,7 +318,7 @@ class GameSession:
                     self._play(ep)
                 phase = 'run'
                 if a is not None:
-                    link.action(*a)
+                    self._act(ep, a)
                 else:
                     # (an episode that ends at once: handled by the loop below on the next STEP
                     # would be wrong; answer it here like the loop does)
@@ -359,6 +363,7 @@ class GameSession:
                 if sim_only:
                     link.sim_only(True)
                 ep = episodes[0]
+                self._prepare(ep)
                 ep.begin(start)
                 a = ep.act(start)
                 if batch and a is not None:
@@ -387,7 +392,7 @@ class GameSession:
                 a = self._begin(ep, start)
                 if batch and a is not None:
                     self._play(ep)
-            link.action(*a)
+            self._act(ep, a)
 
     def ensure_drivable(self, tries: int = 6, wait_s: float = 3.0) -> bool:
         """Right after a map load the race can be saved and simulated while the car cannot move
@@ -407,6 +412,17 @@ class GameSession:
         self.log('  WARNING: the car still does not move. Click into the game or press Enter, then retry.')
         return False
 
+    def _prepare(self, ep: Episode):
+        if getattr(ep, 'supports_hold', False):
+            ep.hold = max(1, self.hold_ticks)
+
+    def _act(self, ep: Episode, a):
+        """Answer the STEP with the episode's action (held for ep.hold ticks if it allows that)."""
+        n = getattr(ep, 'hold', 1) if getattr(ep, 'supports_hold', False) else 1
+        if n > 1:
+            self.link.hold(n)
+        self.link.action(*a)
+
     def _begin(self, ep: Episode, start: P.Step):
         """Rewind to the episode's start: slot 0 (the race start) or, for an episode with
         `start_slot`/`start_step`, a state saved mid-run (branching)."""
@@ -414,6 +430,7 @@ class GameSession:
         st = getattr(ep, 'start_step', None) if slot else None
         self.link.rewind(slot if st is not None else 0)
         s0 = st if st is not None else start
+        self._prepare(ep)
         ep.begin(s0)
         return ep.act(s0)
 

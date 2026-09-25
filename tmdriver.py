@@ -122,6 +122,13 @@ def rl(args):
              warmup=args.warmup, kl_coef=args.kl, seed=args.seed)
 
 
+def check_hold(args):
+    from tmdriver.improve import hold_check
+    ok = hold_check(_link(args), track_id=args.map)
+    if not ok:
+        sys.exit('held runs differ: keep --hold off and send the lines above')
+
+
 def tmx_pool(args):
     import json
     from tmdriver import tmx
@@ -205,7 +212,7 @@ def ghost_replays(args):
     build_all(workers=args.workers, rebuild=args.rebuild)
 
 
-GAME_COMMANDS = {'resim', 'improve', 'drive', 'show', 'eval', 'launch', 'rl'}
+GAME_COMMANDS = {'resim', 'improve', 'drive', 'show', 'eval', 'launch', 'rl', 'check-hold'}
 
 
 def serve_running() -> bool:
@@ -227,6 +234,9 @@ def serve_running() -> bool:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--device', default='auto', help='auto (CUDA if available) | cuda | cpu, for the live driver')
+    ap.add_argument('--hold', type=int, default=0,
+                    help='hold each AI action N ticks in the plugin (5 = one Python round trip per decision; '
+                         'not yet verified in the real game)')
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('install-plugin').set_defaults(fn=install_plugin)
     s = sub.add_parser('serve')
@@ -347,6 +357,10 @@ def main():
     rp.add_argument('--helpers', default='auto')
     rp.add_argument('--port', type=int, default=P.PORT)
     rp.set_defaults(fn=rl)
+    ch = sub.add_parser('check-hold', help='real-game check that --hold 5 gives the same runs (serve must NOT run)')
+    ch.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
+    ch.add_argument('--port', type=int, default=P.PORT)
+    ch.set_defaults(fn=check_hold)
     tp = sub.add_parser('tmx-pool', help='map pool from the TMX search: most awarded maps in a time range')
     tp.add_argument('--maps', type=int, default=2000)
     tp.add_argument('--min', type=float, default=5.0, help='minimum author time in seconds')
@@ -362,6 +376,8 @@ def main():
     gr.set_defaults(fn=ghost_replays)
     args = ap.parse_args()
     os.environ['TMDRIVER_DEVICE'] = args.device
+    if args.hold > 1:
+        os.environ['TMDRIVER_HOLD'] = str(args.hold)
     done = os.environ.get('TMDRIVER_JOB_DONE_FILE')
     if not done and args.cmd in GAME_COMMANDS and serve_running():
         sys.exit('Start_DeltaZero.bat (serve) is running: it would take the game connection away from '

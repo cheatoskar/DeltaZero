@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-PROTOCOL = 11
+PROTOCOL = 12
 HOST = '127.0.0.1'
 PORT = 8478
 
@@ -40,6 +40,8 @@ C_EXEC = 19     # str console command, executed in the plugin's Render() (e.g. '
 C_DRAW = 20     # int n, n x (float x, y, z), float size: path as TMInterface trigger boxes (n = 0 clears)
 MAX_DRAW = 600
 C_WAIT = 22     # (during a STEP) Python is busy: the plugin extends its timeout, the game stays frozen
+C_HOLD = 23     # int n (during a STEP, before the ACTION): the plugin re-applies that ACTION on the next
+                # n - 1 ticks without sending STEPs (stops early at the finish or a restart)
 C_PLAY = 21     # int n, n x (int steer, int gas, int bits) for race times 0, 10, ...; send before the ACTION.
                 # The plugin plays them from the next tick (P_TREC each), then P_TEND + a normal STEP
 MAX_PLAY = 60000

@@ -223,6 +223,7 @@ class FakeGame(threading.Thread):
         self.status = ''
         self.drawn = []
         self.playing = self.play_armed = False
+        self.hold_armed = self.hold_left = 0     # C_HOLD (mirror of the plugin)
         self.play_inputs = []
         self.play_last = -10 ** 9
         self.ui_queue = []
@@ -309,7 +310,7 @@ class FakeGame(threading.Thread):
             return -1
         (t,) = self._take('<i')
         sizes = {P.C_ACTION: 12, P.C_SPEED: 4, P.C_RESTART: 0, P.C_SIMONLY: 4, P.C_SAVE: 4,
-                 P.C_REWIND: 4, P.C_MODE: 4, P.C_BENCH: 4, P.C_WAIT: 0}
+                 P.C_REWIND: 4, P.C_MODE: 4, P.C_BENCH: 4, P.C_WAIT: 0, P.C_HOLD: 4}
         if t == P.C_EXEC:
             if not self._fill(4, deadline):
                 return -1
@@ -384,6 +385,8 @@ class FakeGame(threading.Thread):
             if m == P.MODE_IDLE and self.mode != P.MODE_IDLE:
                 self.pending_release = True
             self.mode = m
+        elif t == P.C_HOLD:
+            (self.hold_armed,) = self._take('<i')
         elif t == P.C_BENCH:
             (n,) = self._take('<i')
             self.bench_left = self.bench_ticks = n
@@ -443,6 +446,11 @@ class FakeGame(threading.Thread):
             return
         if self.playing and not self.run_playback(t):
             return
+        if self.hold_left > 0:            # a held ACTION: the inputs stay, no STEP
+            if self.mode != P.MODE_IDLE and t >= 0 and not self.finished:
+                self.hold_left -= 1
+                return
+            self.hold_left = 0
         if self.mode == P.MODE_IDLE or t < -10 or self.finish_sent:
             return
         if self.mode == P.MODE_RECORD and t >= 0:
@@ -461,6 +469,8 @@ class FakeGame(threading.Thread):
                 deadline = time.monotonic() + 5.0     # like the plugin: Python is busy, keep waiting
             if typ == -1:
                 raise RuntimeError('python timed out')
+        self.hold_left = self.hold_armed - 1 if self.hold_armed > 1 else 0
+        self.hold_armed = 0
         if self.play_armed:
             self.play_armed, self.playing, self.play_last = False, True, -10 ** 9
 

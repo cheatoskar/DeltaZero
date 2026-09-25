@@ -162,6 +162,10 @@ class Link:
         """Show points in the game as small TMInterface trigger boxes (empty list clears)."""
         self.out += P.draw_cmd(points, size)
 
+    def hold(self, n: int):
+        """The next ACTION holds for n ticks (protocol.C_HOLD); send it right before the ACTION."""
+        self.out += P.int_cmd(P.C_HOLD, int(n))
+
     def execute(self, command: str):
         self.out += P.str_cmd(P.C_EXEC, command)
 

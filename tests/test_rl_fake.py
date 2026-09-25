@@ -91,8 +91,60 @@ def main():
     hist3 = RL.rl_train(link, track_id=tid, iterations=1, runs=2, branch=0, warmup=0, helpers=[hlink], seed=9,
                         show=False)
     assert len(hist3) == 1
-    game.stop_flag = helper.stop_flag = True
     print('OK: Ctrl+C mid-iteration: saved, shown, and both instances ran the next training normally')
+
+    # C_HOLD: the same runs with the action held for 5 ticks by the plugin must be identical
+    # (same inputs every tick, same path, same finish), with a fifth of the STEPs
+    from tmdriver.ghost_policy import GhostPolicy
+    from tmdriver.improve import ImproveEpisode, PrefixEpisode, BranchEpisode
+    from tmdriver.session import GameSession
+    sess = GameSession(link)
+    pol = GhostPolicy(os.environ['TMDRIVER_CKPT'])
+    pol.reset([b.__dict__ for b in sess.map.blocks], None, None)
+    runs = {}
+    for hold in (1, 5):
+        sess.hold_ticks = hold
+        n0 = ticks['main']
+        eps = [ImproveEpisode(pol, 60000, 0.0, 1), ImproveEpisode(pol, 60000, 1.0, 5)]
+        res = sess.run(eps, sim_only=True, keep=True)
+        best = res[0]
+        pre = PrefixEpisode(link, pol, best, 3000)
+        res += sess.run([pre, BranchEpisode(pol, 60000, 0.7, 9, pre)], sim_only=True)
+        runs[hold] = (res, ticks['main'] - n0)
+    for a, b in zip(runs[1][0], runs[5][0]):
+        if a.get('prefix'):
+            continue
+        assert a['finished'] == b['finished'] and a['time_ms'] == b['time_ms'], (a['time_ms'], b['time_ms'])
+        end = a['time_ms'] if a['finished'] else min(a['race_ms'], b['race_ms'])
+        ta = [x for x in a['ticks'] if x[0] < end]
+        tb = [x for x in b['ticks'] if x[0] < end]
+        assert ta == tb, 'held inputs differ from per-tick inputs'
+        k = min(len(a['path']), len(b['path']))
+        assert a['path'][:k] == b['path'][:k]
+    steps1, steps5 = runs[1][1], runs[5][1]
+    assert steps5 < steps1 * 0.3, (steps1, steps5)
+    # an instance that finishes its share first waits frozen: it must be kept alive (C_WAIT) while
+    # the other one still drives (here: 14 full runs against one run of 0.5 s)
+    import time as _time
+    from tmdriver.fleet import Fleet, policy_view
+    sess.hold_ticks = 1
+    hs = GameSession(hlink)
+    hs.focus = False
+    assert hs.load_map(next(f for f, m in game.maps.items() if m['uid'] == sess.map.uid), sess.map.uid)
+    fl = Fleet(sess, [hs])
+    t0 = _time.perf_counter()
+    long_ = [ImproveEpisode(pol, 60000, 0.0, k) for k in range(14)]
+    out = fl.run([long_, [ImproveEpisode(policy_view(pol), 500, 0.0, 9)]], keep=True)
+    waited = _time.perf_counter() - t0
+    fl.release()
+    assert waited > 6.0 and out[1][0]['reason'] == 'time limit', (waited, out[1][0]['reason'])
+    print(f'OK: the instance that finished first stayed alive for {waited:.1f}s while the other drove')
+
+    from tmdriver.improve import hold_check
+    assert hold_check(link), 'check-hold reports a difference'
+    game.stop_flag = helper.stop_flag = True
+    print(f'OK: holding 5 ticks gives the same runs (greedy, sampled, branch) with {steps5} instead of '
+          f'{steps1} STEPs')
 
 
 if __name__ == '__main__':

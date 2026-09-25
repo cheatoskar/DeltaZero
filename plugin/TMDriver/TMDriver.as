@@ -12,7 +12,7 @@
 //   DRIVE   a STEP is sent every tick and the plugin waits for Python's ACTION
 //   TEST    like DRIVE; Python runs the self test (simulation-only speed, determinism)
 
-const int PROTOCOL = 11;
+const int PROTOCOL = 12;
 const string HOST = "127.0.0.1";
 const uint16 PORT = 8478;      // the main instance; helpers take the next free ports
 const int MAX_INSTANCES = 8;   // (Python: instances.MAX_INSTANCES)
@@ -53,6 +53,9 @@ const int C_PLAY = 21;    // int n, n x (int steer, int gas, int bits) for race 
 const int MAX_PLAY = 60000;
 const int C_DRAW = 20;    // int n, n x (float x, y, z), float size: show a path as trigger boxes (n = 0 clears)
 const int MAX_DRAW = 600;
+const int C_HOLD = 23;    // (during a STEP, before the ACTION) int n: apply that ACTION for n ticks, i.e.
+                          // re-apply it on the next n - 1 ticks without a STEP (ends early at the finish
+                          // or when the race restarts). One Python round trip per decision, not per tick.
 const int C_WAIT = 22;    // (during a STEP) Python is busy, e.g. learning between rounds: extend the timeout.
                           // The game stays frozen in the step, as in a bruteforce run.
 
@@ -91,6 +94,11 @@ array<int> drawnIds;      // trigger ids this plugin created to show a path
 // batch playback (re-simulation without a Python round trip per tick, like TMI's bruteforce)
 bool playing = false;
 bool playArmed = false;   // C_PLAY received inside a STEP: playback starts with the next tick
+int holdArmed = 0;        // C_HOLD received inside a STEP: the ACTION holds for that many ticks
+int holdLeft = 0;         // ticks still to re-apply the held ACTION on, without a STEP
+int actSteer = 0;         // the last ACTION (the held one)
+int actGas = 0;
+int actBits = 0;
 array<int> playSteer;
 array<int> playGas;
 array<int> playBits;
@@ -247,6 +255,9 @@ int ReadMessage(SimulationManager@ simManager, uint64 deadline)
         if (simManager !is null) {
             ApplyAction(simManager, steer, gas, bits);
         }
+        actSteer = steer;
+        actGas = gas;
+        actBits = bits & ~64;     // a respawn is not repeated while holding
     } else if (type == C_SPEED) {
         if (!WaitBytes(4, deadline)) return -1;
         float s = client.ReadFloat();
@@ -315,6 +326,9 @@ int ReadMessage(SimulationManager@ simManager, uint64 deadline)
             if (!WaitBytes(uint(n), deadline)) return -1;
             pendingExec.Add(client.ReadString(uint(n)));
         }
+    } else if (type == C_HOLD) {
+        if (!WaitBytes(4, deadline)) return -1;
+        holdArmed = client.ReadInt32();
     } else if (type == C_PLAY) {
         if (!WaitBytes(4, deadline)) return -1;
         int n = client.ReadInt32();
@@ -579,6 +593,16 @@ void OnRunStep(SimulationManager@ simManager)
 
     if (playing && !RunPlayback(simManager, t)) return;
 
+    // A held ACTION: re-apply it (exactly what answering this tick would do) and send nothing.
+    if (holdLeft > 0) {
+        if (mode != MODE_IDLE && t >= 0 && !simManager.PlayerInfo.RaceFinished) {
+            holdLeft--;
+            ApplyAction(simManager, actSteer, actGas, actBits);
+            return;
+        }
+        holdLeft = 0;             // the finish, a restart or Stop: report this tick as usual
+    }
+
     // Commands between steps (mode, status, drawing) normally arrive in Render(), which the
     // game does not call while its window is minimized: read them here as well.
     while (client !is null && client.Available >= 4) {
@@ -612,6 +636,8 @@ void OnRunStep(SimulationManager@ simManager)
             break;
         }
     }
+    holdLeft = holdArmed > 1 ? holdArmed - 1 : 0;
+    holdArmed = 0;
     if (playArmed) {            // the ACTION above is the input for this tick; the rest is ours
         playArmed = false;
         playing = true;

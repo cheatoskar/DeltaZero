@@ -44,6 +44,8 @@ class ImproveEpisode(Episode):
     "On the ground" = a wheel touches it OR slower than 10 m/s: flights do not count (measured
     gaps up to 18.5 s on a speed map), but a car on its roof or side touches nothing with its
     wheels either (seen 2026-09-25: runs stuck at a wall until the 180 s limit)."""
+    supports_hold = True     # GameSession may hold each action for `hold` ticks (C_HOLD)
+    hold = 1
     STALL_MS = 3000
     CELL_STALL_MS = 5000
     OFF_TRACK_MS = 4000
@@ -84,7 +86,9 @@ class ImproveEpisode(Episode):
             # (inputs, steer bin, gas, brake, race time, progress so far): rl.py makes rewards from the last two
             self.decisions.append((pol.last_inputs, o['bin'], o['gas'], o['brake'], st.race_time, pol.progress_m))
         if st.race_time >= 0:
-            self.ticks.append((st.race_time, *a))
+            # the held ticks too (C_HOLD): the plugin re-applies this action without asking
+            for k in range(max(1, self.hold)):
+                self.ticks.append((st.race_time + 10 * k, *a))
             if st.race_time % 100 == 0:
                 self.path.append(st.pos.astype(float).tolist())
         prog = pol.progress_m
@@ -702,3 +706,37 @@ def drive_preview(link, track_id: Optional[int] = None, speed: float = 1.0, ckpt
     log(f'drive: {rtxt}; identical to the plan: {same}')
     sess.status(f'AI: {rtxt} (plan {txt}, {"identical" if same else "DIFFERENT"}, {line_tag})')
     return plan, real
+
+
+def hold_check(link, track_id: Optional[int] = None, ckpt: Path = None, log=print) -> bool:
+    """Real-game check of C_HOLD: a greedy and a sampled run, once answered every tick and once
+    held for 5 ticks by the plugin, must have the same inputs, path and result."""
+    ckpt = Path(ckpt or DRIVER_CKPT)
+    policy = GhostPolicy(ckpt, device=torch_device())
+    sess = GameSession(link, log)
+    _, uid, _ = open_map(sess, track_id, 5, log)
+    line, judge, _ = reference_setup(uid, track_id, False, log)
+    policy.reset([b.__dict__ for b in sess.map.blocks], line, judge)
+    sess.ensure_drivable()
+    runs = {}
+    for hold in (1, 5):
+        sess.hold_ticks = hold
+        t0 = time.perf_counter()
+        res = sess.run([ImproveEpisode(policy, 60000, 0.0, 1), ImproveEpisode(policy, 60000, 1.0, 5)], sim_only=True)
+        runs[hold] = (res, time.perf_counter() - t0)
+        log(f"hold {hold}: {', '.join(run_text(r) + ' (' + str(r['reason']) + ')' for r in res)} in {runs[hold][1]:.1f}s")
+    same = True
+    for a, b in zip(runs[1][0], runs[5][0]):
+        end = a['time_ms'] if a['finished'] and b['finished'] else min(a['race_ms'], b['race_ms'])
+        ta = [x for x in a['ticks'] if x[0] < end]
+        tb = [x for x in b['ticks'] if x[0] < end]
+        k = min(len(a['path']), len(b['path']))
+        ok = a['finished'] == b['finished'] and a['time_ms'] == b['time_ms'] and ta == tb and \
+            a['path'][:k] == b['path'][:k]
+        if not ok:
+            first = next((x for x, y in zip(ta, tb) if x != y), None)
+            log(f'  DIFFERENT: {run_text(a)} vs {run_text(b)}; first differing tick {first}')
+        same &= ok
+    log(f"held runs identical to per-tick runs: {same}; time {runs[1][1]:.1f}s -> {runs[5][1]:.1f}s")
+    sess.status(f'Hold check: identical {same}, {runs[1][1]:.1f}s -> {runs[5][1]:.1f}s')
+    return same

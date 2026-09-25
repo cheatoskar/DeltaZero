@@ -46,30 +46,50 @@ class Fleet:
         groups = list(groups) + [[] for _ in range(len(self.sessions) - len(groups))]
         results: List[List[dict]] = [[] for _ in self.sessions]
         errors = []
+        waiting = []                         # hold() contexts of instances that finished first
+        lock = threading.Lock()
 
         def work(i):
+            s = self.sessions[i]
             try:
-                results[i] = self.sessions[i].run(groups[i], sim_only=sim_only, keep=keep)
+                results[i] = s.run(groups[i], sim_only=sim_only, keep=keep)
+                if keep:
+                    # This instance is frozen in a STEP now; the others may need much longer than
+                    # the plugin's 5 s answer timeout (seen 2026-09-25: the helper dropped while
+                    # the main instance still drove its greedy run). Keep it waiting until all are done.
+                    cm = s.hold()
+                    cm.__enter__()
+                    with lock:
+                        waiting.append(cm)
             except BaseException as e:       # reported to the caller after all threads ended
                 errors.append((i, e))
                 self.stop.set()
 
         busy = [i for i, g in enumerate(groups) if g]
-        if len(busy) == 1:
-            work(busy[0])                   # no thread for a single instance (plain Ctrl+C)
-        else:
-            threads = [threading.Thread(target=work, args=(i,), daemon=True) for i in busy]
-            for t in threads:
-                t.start()
-            try:
+        for i, s in enumerate(self.sessions):
+            if i not in busy:                # idle this round but maybe frozen from the last one
+                cm = s.hold()
+                cm.__enter__()
+                waiting.append(cm)
+        try:
+            if len(busy) == 1:
+                work(busy[0])               # no thread for a single instance (plain Ctrl+C)
+            else:
+                threads = [threading.Thread(target=work, args=(i,), daemon=True) for i in busy]
                 for t in threads:
-                    while t.is_alive():
-                        t.join(0.2)
-            except KeyboardInterrupt:
-                self.stop.set()
-                for t in threads:
-                    t.join(30.0)
-                raise
+                    t.start()
+                try:
+                    for t in threads:
+                        while t.is_alive():
+                            t.join(0.2)
+                except KeyboardInterrupt:
+                    self.stop.set()
+                    for t in threads:
+                        t.join(30.0)
+                    raise
+        finally:
+            for cm in waiting:              # the pings stop; the caller holds again if it needs to
+                cm.__exit__(None, None, None)
         if errors:
             self.stop.set()
             raise errors[0][1]
