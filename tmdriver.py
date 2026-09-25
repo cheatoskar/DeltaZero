@@ -51,7 +51,8 @@ def serve(args):
         runs = Path(__file__).resolve().parent / 'runs'
         named = {'best': runs / 'm1' / 'driver.pt', 'last': runs / 'm1' / 'driver_last.pt',
                  'ghost': runs / 'ghost' / 'best.pt', 'ghost-latest': runs / 'ghost' / 'latest.pt',
-                 'ghost-ft': runs / 'ghost_ft' / 'best.pt'}
+                 'ghost-ft': runs / 'ghost_ft' / 'best.pt', 'ghost-big': runs / 'ghost_big' / 'best.pt',
+                 'ghost-big2': runs / 'ghost_big2' / 'best.pt'}
         ckpt = named.get(args.model, Path(args.model))
         if not ckpt.exists():
             sys.exit(f'model not found: {ckpt}')
