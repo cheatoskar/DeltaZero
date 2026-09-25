@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from . import ghost as G
+from . import course as C
 from . import protocol as P
 from .ghost_torch import DriverNet2, block_features
 
@@ -44,13 +45,17 @@ class GhostPolicy:
         self.ckpt = str(ckpt)
         self.line = None
         self.blocks = None
+        self.track = frozenset()
 
     # ------------------------------------------------------------------ episode
 
-    def reset(self, blocks: List[dict], line=None):
-        """blocks: the plugin's P_MAP block dicts. line: None, positions (N, 3) or a ghost.Line."""
+    def reset(self, blocks: List[dict], line=None, judge=None):
+        """blocks: the plugin's P_MAP block dicts. line: None, positions (N, 3) or a ghost.Line.
+        judge: a run that only MEASURES progress (the model does not see it), e.g. the fastest
+        TMX replay when the AI drives without the line; None: track cells (course.py)."""
         if getattr(self, '_blocks_src', None) is not blocks:
             self.blocks = G.MapBlocks.from_plugin(blocks, self.vocab)
+            self.track = C.track_cells(blocks)
             self._blocks_src = blocks
             d = self.device
             self._bt = (torch.as_tensor(self.blocks.center, dtype=torch.float32, device=d)[None],
@@ -60,6 +65,8 @@ class GhostPolicy:
                         torch.as_tensor(self.blocks.tb, dtype=torch.float32, device=d)[None],
                         torch.ones(1, len(self.blocks.name_id), dtype=torch.bool, device=d))
         self.set_line(line)
+        self.judge = None if judge is None or self.has_line else \
+            judge if isinstance(judge, G.Line) else G.Line(np.asarray(judge))
         self.restart()
 
     def set_line(self, line):
@@ -70,24 +77,32 @@ class GhostPolicy:
         else:
             self.line = G.Line(np.asarray(line))
 
-    STATE = ('pos', 'psi', 'psi0', 's', 'odo', 'last_p', 'action', 'last_out', 'last_decision_t')
+    STATE = ('pos', 'psi', 'psi0', 's', 'js', 'odo', 'cells', 'cps', 'on_track', 'last_p', 'action', 'last_out',
+             'last_decision_t')
+
+    @staticmethod
+    def _copy(v):
+        return dict(v) if isinstance(v, dict) else set(v) if isinstance(v, set) else v
 
     def snapshot(self) -> dict:
-        """The per-run state (history, line position, odometer): restore() continues a run
-        from here, e.g. from a game state saved mid-run."""
-        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in
-                ((k, getattr(self, k)) for k in self.STATE)}
+        """The per-run state (history, line position, odometer, cells reached): restore()
+        continues a run from here, e.g. from a game state saved mid-run."""
+        return {k: self._copy(getattr(self, k)) for k in self.STATE}
 
     def restore(self, snap: dict):
         for k, v in snap.items():
-            setattr(self, k, dict(v) if isinstance(v, dict) else v)
+            setattr(self, k, self._copy(v))
 
     def restart(self):
         self.pos = {}
         self.psi = {}
         self.psi0 = None
         self.s = 0.0
+        self.js = 0.0             # arc position along the judge run
         self.odo = 0.0
+        self.cells = set()        # track cells reached (course.py), progress without a line
+        self.cps = 0              # checkpoints passed
+        self.on_track = True
         self.last_p = None
         self.action = (0, 0, 0)
         self.last_out = None
@@ -98,8 +113,19 @@ class GhostPolicy:
         return isinstance(self.line, G.Line)
 
     @property
+    def line_progress(self) -> bool:
+        """Progress is metres along a run (the model's line, or the judge run)."""
+        return self.has_line or getattr(self, 'judge', None) is not None
+
+    @property
     def progress_m(self) -> float:
-        return self.s if self.has_line else self.odo
+        """Metres along the reference line or the judge run; without either, track cells reached
+        x 32 m (course.py)."""
+        if self.has_line:
+            return self.s
+        if getattr(self, 'judge', None) is not None:
+            return self.js
+        return len(self.cells) * C.CELL_M
 
     # ------------------------------------------------------------------ features
 
@@ -161,6 +187,13 @@ class GhostPolicy:
         if self.last_p is not None:
             self.odo += float(np.linalg.norm(p - self.last_p))
         self.last_p = p
+        self.cps = max(self.cps, int(step.checkpoints))
+        c = C.cell_of(p)
+        self.on_track = c in self.track
+        if self.on_track:
+            self.cells.add(c)
+        if getattr(self, 'judge', None) is not None and t % G.DT_MS == 0:
+            self.js = self.judge.locate(p, self.js)
         if self.has_line and t % G.DT_MS == 0:
             # on the 100 ms lattice only, exactly like tracebuild's progress()
             self.s = self.line.locate(p, self.s)

@@ -95,6 +95,31 @@ def main():
             assert np.array_equal(v, z[k]), (r['file'], k)
     print('batch == per-tick: identical recordings')
 
+    # 1c) two game instances share the maps (instances.py): all exact, both did some maps,
+    # and the recordings equal the single-instance ones
+    helper = FG.FakeGame(PORT + 5)
+    helper.maps = game.maps
+    loads = {'main': 0, 'helper': 0}
+    for g, key in ((game, 'main'), (helper, 'helper')):
+        orig_load = g.load
+
+        def counted(f, orig_load=orig_load, key=key):
+            loads[key] += 1
+            return orig_load(f)
+
+        g.load = counted
+    helper.start()
+    res3 = run_resim(link, load_replay=lambda p: pickle.loads(Path(p).read_bytes()), log=print,
+                     only_missing=False, helpers=[Link.connect(port=PORT + 5, wait_s=5)])
+    assert len(res3) == len(res) and all(r['exact'] for r in res3), len(res3)
+    assert loads['main'] > 0 and loads['helper'] > 0, loads
+    for r in res3:
+        z = np.load(r['file'])
+        for k, v in snap[r['file']].items():
+            assert np.array_equal(v, z[k]), (r['file'], k)
+    helper.stop_flag = True
+    print(f'two instances: {len(res3)} replays exact, maps loaded per instance {loads}')
+
     # 2) dataset (includes the steer / block-direction convention checks)
     from tmdriver.dataset import build, DATASET
     build(stride=3)

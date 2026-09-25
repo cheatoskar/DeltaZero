@@ -5,6 +5,7 @@ one ACTION (`link.action`), which may be preceded by other commands. In RECORD m
 plugin does not wait, so nothing is answered.
 """
 import json
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -196,7 +197,9 @@ class Driver(Task):
         policy = c._policy if DRIVER_CKPT.exists() else None   # preloaded on the button press
         if policy is not None and c.map is not None and getattr(policy, 'ghost', False):
             from . import policy as pol
-            ref = pol.reference_positions(c.map.uid, pol.track_id_for(c.map.uid))
+            # the reference line only with `serve --line` (TMDRIVER_LINE=1), as for Drive / Train
+            use_line = os.environ.get('TMDRIVER_LINE') == '1'
+            ref = pol.reference_positions(c.map.uid, pol.track_id_for(c.map.uid)) if use_line else None
             line_pos, src = ref if ref else (None, 'keine Linie, nur Bloecke')
             self.ctrl = GhostController(policy, [b.__dict__ for b in c.map.blocks], line_pos)
             self.kind = f'Modell {Path(policy.ckpt).parent.name}/{Path(policy.ckpt).name}, Linie: {src}'

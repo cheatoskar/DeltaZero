@@ -51,6 +51,16 @@ def track_info(track_id: int) -> Dict:
     return d['Results'][0]
 
 
+def track_id_by_uid(uid: str):
+    """TMX id of a map uid, or None if TMX does not have the map. `/api/tracks?uid=` checked
+    2026-09-25 (414041 <-> RA0Km2Yx1v0wEGZCDIPjv0wmkIh); the answer's UId is verified."""
+    d = json.loads(get(f'{BASE}/api/tracks?fields=TrackId,UId&uid={uid}'))
+    for r in d.get('Results', []):
+        if r.get('UId') == uid:
+            return int(r['TrackId'])
+    return None
+
+
 def replay_list(track_id: int, count: int = 25) -> List[Dict]:
     d = json.loads(get(f'{BASE}/api/replays?trackId={track_id}&count={count}'
                        f'&fields=ReplayId,ReplayTime,Position,User.Name'))
@@ -62,9 +72,41 @@ def safe_name(name: str) -> str:
     return re.sub(r'[^A-Za-z0-9_\-]+', '_', name).strip('_')[:40] or 'map'
 
 
+_GAME_DIR = []
+
+
+def game_dir(log=print) -> Path:
+    """The game's user folder (holds Tracks/Challenges; the `map` command is relative to it).
+    TMDRIVER_GAME_DIR wins (the plugin passes the TMI variable tmdriver_game_folder). Otherwise
+    the candidate whose Profiles folder changed last: the laptop's TMNF uses
+    Documents/TmForever, the home PC's uses Documents/TrackMania (2026-09-25: its profile was
+    written at the game start, the TmForever one not since August)."""
+    env = os.environ.get('TMDRIVER_GAME_DIR', '').strip()
+    if env:
+        return Path(env)
+    if _GAME_DIR:
+        return _GAME_DIR[0]
+    home = Path(os.path.expanduser('~'))
+    cands = [home / docs / name for docs in ('Documents', 'OneDrive/Dokumente', 'OneDrive/Documents')
+             for name in ('TmForever', 'TrackMania')]
+    cands = [c for c in cands if (c / 'Tracks').is_dir()]
+    if not cands:
+        pick = home / 'Documents' / 'TmForever'
+    else:
+        def used(c):
+            p = c / 'Profiles'
+            return p.stat().st_mtime if p.exists() else c.stat().st_mtime
+        pick = max(cands, key=used)
+        if len(cands) > 1:
+            log(f'game folder: {pick} (most recently used of {len(cands)}; to force another: '
+                f'`set tmdriver_game_folder <path>` in the TMI console)')
+    _GAME_DIR.append(pick)
+    return pick
+
+
 def tracks_dir() -> Path:
-    """TMNF's own user folder (TMUF uses Documents/TrackMania instead)."""
-    return Path(os.path.expanduser('~')) / 'Documents' / 'TmForever' / 'Tracks' / 'Challenges' / 'TMDriver'
+    """Where downloaded maps go: <game folder>/Tracks/Challenges/TMDriver."""
+    return game_dir() / 'Tracks' / 'Challenges' / 'TMDriver'
 
 
 def fetch(track_id: int, n_replays: int, tmx_root: Path, safe_uid, log=print, reps=None) -> Dict:

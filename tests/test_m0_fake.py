@@ -54,7 +54,7 @@ def main():
     logs = []
     srv = S.Server(link, log=logs.append, calibration_path=tmp / 'calibration.json')
     threading.Thread(target=lambda: _run(srv), daemon=True).start()
-    wait_status(game, 'Python verbunden')
+    wait_status(game, 'Python connected')
 
     # 1) self test without a recording
     game.press(P.MODE_TEST)

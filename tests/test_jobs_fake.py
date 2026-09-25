@@ -43,10 +43,11 @@ def main():
     game = FG.FakeGame(PORT)
     game.reconnect = True
     game.start()
-    jobs = []
+    jobs, dirs = [], []
 
     def spawn(req, done):
         jobs.append(req.command())
+        dirs.append(req.game_dir)
         return FakeJob(req, done)
 
     orig = S.Context.policy
@@ -57,7 +58,8 @@ def main():
     while game.accepts < 1 and time.monotonic() < deadline:
         time.sleep(0.05)
     time.sleep(0.5)
-    game.press_job(P.JOB_TRAIN, 10036840, 7, 3, P.JOB_GPU)
+    game.press_job(P.JOB_TRAIN, 10036840, 7, 3, P.JOB_GPU | P.JOB_LINE,   # 'show new best' off
+                   game_dir=r'C:\Users\x\Documents\TrackMania')
     deadline = time.monotonic() + 15
     while game.accepts < 3 and time.monotonic() < deadline:   # serve, job, serve again
         time.sleep(0.05)
@@ -67,9 +69,11 @@ def main():
     t.join(timeout=15)
     assert not t.is_alive(), 'serve did not return after two jobs'
     S.Context.policy = orig
-    assert jobs[0][3:] == ['--device', 'auto', 'improve', '--rounds', '7', '--map', '10036840'], jobs[0]
+    assert jobs[0][3:] == ['--device', 'auto', 'improve', '--rounds', '7', '--map', '10036840', '--line',
+                           '--no-show'], jobs[0]
+    assert dirs == [r'C:\Users\x\Documents\TrackMania', ''], dirs   # tmdriver_game_folder
     assert jobs[1][3:] == ['--device', 'cpu', 'resim', '--source', 'bulk', '--replays', '5', '--hours', '1.5',
-                           '--per-tick'], jobs[1]
+                           '--map', '0', '--per-tick'], jobs[1]
     game.stop_flag = True
     print('OK: job buttons hand the connection to the job and serve reconnects afterwards')
 

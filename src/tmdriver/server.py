@@ -15,30 +15,36 @@ from .tasks import Context, Driver, Recorder, SelfTest, Task
 
 TASKS = {P.MODE_RECORD: Recorder, P.MODE_DRIVE: Driver, P.MODE_TEST: SelfTest}
 ROOT = Path(__file__).resolve().parents[2]
-JOB_NAMES = {P.JOB_DRIVE: 'Drive', P.JOB_TRAIN: 'Train', P.JOB_RESIM: 'Re-simulate replays', P.JOB_SHOW: 'Show best run'}
+JOB_NAMES = {P.JOB_DRIVE: 'Drive', P.JOB_TRAIN: 'Train', P.JOB_RESIM: 'Re-simulate replays', P.JOB_SHOW: 'Show best run',
+             P.JOB_LAUNCH: 'Launch helper instances'}
 
 
 class JobRequest(Exception):
     """A tool button: the server hands the game connection to a job in its own console."""
 
-    def __init__(self, job, track_id, rounds, minutes, flags):
+    def __init__(self, job, track_id, rounds, minutes, flags, game_dir=''):
         super().__init__(JOB_NAMES.get(job, job))
         self.job, self.track_id, self.rounds, self.flags = job, track_id, rounds, flags
+        self.game_dir = game_dir.strip().strip('"')
         self.hours = round(max(minutes, 6) / 60.0, 2)
 
     def command(self):
         cmd = [sys.executable, '-u', str(ROOT / 'tmdriver.py'),
                '--device', 'auto' if self.flags & P.JOB_GPU else 'cpu']
         m = ['--map', str(self.track_id)] if self.track_id > 0 else []
+        line = ['--line'] if self.flags & P.JOB_LINE else []
         if self.job == P.JOB_DRIVE:
-            return cmd + ['drive'] + m
+            return cmd + ['drive'] + m + line
         if self.job == P.JOB_TRAIN:
-            return cmd + ['improve', '--rounds', str(max(1, self.rounds))] + m
+            return cmd + ['improve', '--rounds', str(max(1, self.rounds))] + m + line +                 ([] if self.flags & P.JOB_SHOW_BEST else ['--no-show'])
         if self.job == P.JOB_RESIM:
-            return cmd + ['resim', '--source', 'bulk', '--replays', '5', '--hours', str(self.hours)] + \
+            return cmd + ['resim', '--source', 'bulk', '--replays', '5', '--hours', str(self.hours),
+                          '--map', str(max(self.track_id, 0))] + \
                 (['--per-tick'] if self.flags & P.JOB_PER_TICK else [])
         if self.job == P.JOB_SHOW:
             return cmd + ['show'] + m
+        if self.job == P.JOB_LAUNCH:
+            return cmd + ['launch', '--helpers', str(max(1, self.rounds))]
         raise ValueError(f'unknown job {self.job}')
 
 
@@ -46,6 +52,8 @@ def spawn_job(req: JobRequest, done_file: Path):
     """Start the job in a new console window (Windows) with live output. It touches
     done_file when it has finished (its window stays open until Enter)."""
     env = dict(os.environ, TMDRIVER_JOB_DONE_FILE=str(done_file), TMDRIVER_JOB_TITLE=f'TMDriver - {req}')
+    if req.game_dir:
+        env['TMDRIVER_GAME_DIR'] = req.game_dir      # the TMI variable tmdriver_game_folder
     flags = subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
     return subprocess.Popen(req.command(), cwd=str(ROOT), env=env, creationflags=flags)
 

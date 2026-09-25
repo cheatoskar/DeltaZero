@@ -8,6 +8,7 @@ with every STEP field (the same fields the live driver sees) plus the ACTION app
 that tick, which is the training label.
 """
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List
@@ -102,35 +103,86 @@ def bulk_maps() -> List[dict]:
     return out
 
 
+def tmx_maps(sess: GameSession, track_ids, log=print) -> List[dict]:
+    """TMX maps as run_resim entries, fetched lazily (fetch_entry) when their turn comes. An id 0
+    is the map open in the game (its TMX id is looked up by uid)."""
+    from . import tmx
+    from .improve import open_map
+    out = []
+    for tid in track_ids:
+        if not tid:
+            _, uid, _ = open_map(sess, None, 0, log)
+            tid = tmx.track_id_by_uid(uid)
+            if not tid:
+                raise SystemExit(f'the open map {sess.map.name!r} is not on TMX: no replays to re-simulate')
+        out.append({'lazy': int(tid), 'track_id': int(tid), 'name': f'TMX {tid}'})
+    return out
+
+
+def fetch_entry(track_id: int, n_replays: int, log=print) -> dict:
+    """Map + fastest replays from TMX (files already there are not downloaded again)."""
+    from . import tmx
+    res = tmx.fetch(track_id, n_replays, TMX, safe, log=lambda *a: None)
+    return {'ok': True, 'track_id': track_id, 'uid': res['uid'], 'name': res['info']['TrackName'],
+            'map_file': res['map'].name, 'holdout': False,
+            'replays': [{'file': p.name, 'path': str(p)} for p in res['replays']]}
+
+
+# measured on cheatoskar's laptop 2026-09-24 (self test) and in every exact resim run since
+DEFAULT_REPLAY_ALIGNMENT = {'shift': 1, 'steer_sign': -1}
+
+
 def run_resim(link, only_missing: bool = True, max_replays: int = 5, log=print,
               load_replay=replay_mod.load, limit: int = 0, source: str = 'm1', start: int = 0,
-              hours: float = 0.0, batch: bool = True) -> List[dict]:
-    """source 'm1' (the 80-map manifest) or 'bulk' (data/bulk/maps.jsonl -> data/resim).
+              hours: float = 0.0, batch: bool = True, track_ids=(), helpers=()) -> List[dict]:
+    """source 'm1' (the 80-map manifest), 'bulk' (data/bulk/maps.jsonl -> data/resim) or 'tmx'
+    (track_ids, 0 = the map open in the game; fetched from TMX when missing -> data/resim).
+    Replays that were already re-simulated are skipped (only_missing), so a stopped run
+    continues where it was.
     hours > 0 stops after that long (between maps). batch: the plugin plays each replay's
-    inputs itself (no Python round trip per tick)."""
-    out_root = BULK_RESIM if source == 'bulk' else RESIM
+    inputs itself (no Python round trip per tick).
+    helpers: Links to more game instances (instances.py); every instance takes the next map
+    from one shared queue, so long and short maps even out."""
+    out_root = BULK_RESIM if source in ('bulk', 'tmx') else RESIM
     t_end = time.monotonic() + hours * 3600 if hours else None
     sess = GameSession(link, log)
     cal = sess.calib.data.get('replay')
     if not cal or 'shift' not in cal or 'steer_sign' not in cal:
-        raise RuntimeError('calibration has no replay alignment: run the self test on a map with TMX replays')
+        # Safe: a wrong alignment cannot pass unnoticed, every run is checked to be exact.
+        cal = DEFAULT_REPLAY_ALIGNMENT
+        log(f"no replay alignment in {sess.calib.path}: using the measured one {cal} "
+            f"(each run is still checked to be exact)")
     shift, sign = int(cal['shift']), int(cal['steer_sign'])
-    if source == 'bulk':
+    if source == 'tmx':
+        maps = tmx_maps(sess, list(track_ids) or [0], log)
+    elif source == 'bulk':
         maps = bulk_maps()
     else:
         maps = [m for m in json.loads(MANIFEST.read_text(encoding='utf-8'))['maps'].values() if m.get('ok')]
     maps = maps[start:]
     if limit:
         maps = maps[:limit]
-    log(f'{len(maps)} maps; alignment shift {shift}, analog steer sign {sign}')
+    sessions = [sess]
+    for k, h in enumerate(helpers):
+        hs = GameSession(h, lambda *a, k=k: log(f'[#{k + 2}]', *a))
+        hs.focus = False            # the window focus belongs to the main instance
+        sessions.append(hs)
+    log(f'{len(maps)} maps on {len(sessions)} game instance(s); alignment shift {shift}, '
+        f'analog steer sign {sign}')
     index_path = out_root / 'index.jsonl'
     out_root.mkdir(parents=True, exist_ok=True)
     all_results = []
+    todo = list(enumerate(maps))
+    lock = threading.Lock()
     t_start = time.monotonic()
-    for k, m in enumerate(maps):
-        if t_end and time.monotonic() > t_end:
-            log(f'time budget reached after {k} maps')
-            break
+
+    def one_map(ss: GameSession, k: int, m: dict, tag: str):
+        if 'lazy' in m:
+            try:
+                m = fetch_entry(m['lazy'], max_replays, log)
+            except Exception as e:           # not on TMX any more, network: skip this map
+                log(f"{tag}SKIP TMX {m['lazy']}: {e!r}"[:160])
+                return
         eps = []
         for r in m['replays'][:max_replays]:
             if 'error' in r or r.get('uid_ok') is False or r.get('respawns', 0) > 0:
@@ -141,7 +193,7 @@ def run_resim(link, only_missing: bool = True, max_replays: int = 5, log=print,
             try:
                 rep = load_replay(r['path'] if 'path' in r else TMX / safe(m['uid']) / r['file'])
             except Exception as e:
-                log(f"  unreadable replay {r['file']}: {e!r}"[:160])
+                log(f"{tag}  unreadable replay {r['file']}: {e!r}"[:160])
                 continue
             if rep.map_uid != m['uid'] or rep.respawns > 0:     # bulk entries: checked here
                 continue
@@ -149,22 +201,67 @@ def run_resim(link, only_missing: bool = True, max_replays: int = 5, log=print,
                 'track_id': m['track_id'], 'uid': m['uid'], 'replay': rid, 'player': r.get('player'),
                 'analog': rep.uses_analog_steer, 'holdout': m['holdout']}, out_root))
         if not eps:
-            continue
-        sess.status(f"Re-simulation {k + 1}/{len(maps)}: {m['name']} ({len(eps)} replays)")
-        if not sess.load_map(m['map_file'], m['uid']):
-            log(f"SKIP {m['track_id']} {m['name']!r}: map did not load")
-            continue
-        res = sess.run(eps, sim_only=True, batch=batch)
-        with open(index_path, 'a', encoding='utf-8') as f:
-            for r in res:
-                f.write(json.dumps({k2: v for k2, v in r.items()}) + '\n')
-        ok = sum(r['exact'] for r in res)
-        all_results += res
-        n_ok = sum(r['exact'] for r in all_results)
-        el = time.monotonic() - t_start
-        log(f"[{k + 1}/{len(maps)}] {m['name']!r}: {ok}/{len(res)} exact, "
-            f"{sum(r['ticks'] for r in res)} ticks in {sum(r['wall_s'] for r in res):.1f}s | total "
-            f"{n_ok}/{len(all_results)} exact, {len(all_results) / max(el, 1) * 3600:.0f} replays/h")
+            return
+        from .tmx import tracks_dir
+        game_map = tracks_dir() / m['map_file']
+        if not game_map.exists():               # bulk maps: copy data/maps/<id> into the game folder
+            from .bulk import MAP_DIR
+            src = MAP_DIR / f"{m['track_id']}.Challenge.Gbx"
+            if src.exists():
+                game_map.parent.mkdir(parents=True, exist_ok=True)
+                game_map.write_bytes(src.read_bytes())
+        ss.status(f"Re-simulation {k + 1}/{len(maps)}: {m['name']} ({len(eps)} replays)")
+        if not ss.load_map(m['map_file'], m['uid']):
+            log(f"{tag}SKIP {m['track_id']} {m['name']!r}: map did not load")
+            return
+        res = ss.run(eps, sim_only=True, batch=batch)
+        with lock:
+            with open(index_path, 'a', encoding='utf-8') as f:
+                for r in res:
+                    f.write(json.dumps({k2: v for k2, v in r.items()}) + '\n')
+            all_results.extend(res)
+            ok = sum(r['exact'] for r in res)
+            n_ok = sum(r['exact'] for r in all_results)
+            el = time.monotonic() - t_start
+            log(f"{tag}[{k + 1}/{len(maps)}] {m['name']!r}: {ok}/{len(res)} exact, "
+                f"{sum(r['ticks'] for r in res)} ticks in {sum(r['wall_s'] for r in res):.1f}s | total "
+                f"{n_ok}/{len(all_results)} exact, {len(all_results) / max(el, 1) * 3600:.0f} replays/h")
+
+    errors = []
+
+    def worker(ss: GameSession, tag: str):
+        while True:
+            with lock:
+                if not todo or errors:
+                    return
+                if t_end and time.monotonic() > t_end:
+                    if todo:
+                        log(f'{tag}time budget reached')
+                    return
+                k, m = todo.pop(0)
+            try:
+                one_map(ss, k, m, tag)
+            except BaseException as e:          # a lost instance: its map goes back to the queue
+                with lock:
+                    todo.insert(0, (k, m))
+                    if len(sessions) == 1 or isinstance(e, KeyboardInterrupt):
+                        errors.append(e)
+                log(f'{tag}instance stopped: {e!r}'[:200])
+                return
+
+    if len(sessions) == 1:
+        worker(sess, '')
+    else:
+        threads = [threading.Thread(target=worker, args=(ss, f'[#{n + 1}] '), daemon=True)
+                   for n, ss in enumerate(sessions)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            while t.is_alive():
+                t.join(0.5)
+    if errors:
+        raise errors[0]
     n_ok = sum(r['exact'] for r in all_results)
-    sess.status(f'Re-simulation done: {n_ok}/{len(all_results)} replays exact.')
+    for ss in sessions:
+        ss.status(f'Re-simulation done: {n_ok}/{len(all_results)} replays exact.')
     return all_results

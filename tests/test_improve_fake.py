@@ -64,7 +64,8 @@ def main():
         return r
 
     IM.PrefixEpisode.result = pre_result
-    hist = IM.improve(link, track_id=tid, rounds=3, episodes=3, steps=5, bs=64, branch=4)
+    hist = IM.improve(link, track_id=tid, rounds=3, episodes=3, steps=5, bs=64, branch=4, use_line=True)
+    assert all(h['line'] for h in hist), 'the fake TMX replay must give a reference line'
     IM.fine_tune, IM.GameSession.run, IM.PrefixEpisode.result = orig_ft, orig_run, orig_pre
     assert prefixes and all(r['diverged_m'] is not None and r['diverged_m'] < 1e-3 for r in prefixes), prefixes
     assert all(h['branch_from_s'] for h in hist[1:]), [h['branch_from_s'] for h in hist]
@@ -79,6 +80,49 @@ def main():
     print((out / 'best_inputs.txt').read_text()[:200])
     assert (out / 'best_run.json').exists()
     IM.show_best(link, track_id=tid)          # the "Show best run" button
+
+    # without the line (the default): progress = track cells reached + checkpoints (course.py)
+    hist = IM.improve(link, track_id=tid, rounds=2, episodes=3, steps=5, bs=64, branch=4, show=False)
+    assert not any(h['line'] for h in hist)
+    assert hist[-1]['best_progress_m'] >= 3 * 32, hist[-1]
+    print('no line:', [(h['round'], h['greedy'], h['finished'], h['best_ms'], h['best_progress_m'], h['reasons'])
+                       for h in hist])
+
+    # stopping early (Ctrl+C): during the learning step (game held) and in the middle of a run
+    # (the plugin waits for an ACTION). The best run is saved and shown, the link stays in sync.
+    for where in ('fine_tune', 'run'):
+        calls = []
+        orig_act = IM.ImproveEpisode.act
+
+        def boom_ft(*a, **k):
+            calls.append(1)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            return orig_ft(*a, **k)
+
+        def boom_act(self, st):
+            if len(calls) >= 1 and st.race_time == 2000:
+                raise KeyboardInterrupt
+            return orig_act(self, st)
+
+        def count_ft(*a, **k):
+            calls.append(1)
+            return orig_ft(*a, **k)
+
+        if where == 'fine_tune':
+            IM.fine_tune = boom_ft
+        else:
+            IM.fine_tune, IM.ImproveEpisode.act = count_ft, boom_act
+        (out / 'best_run.json').unlink()
+        shown.clear()
+        IM.GameSession.run = run
+        hist = IM.improve(link, track_id=tid, rounds=5, episodes=3, steps=5, bs=64, branch=4, show=False)
+        IM.fine_tune, IM.ImproveEpisode.act, IM.GameSession.run = orig_ft, orig_act, orig_run
+        assert len(hist) == 1, (where, len(hist))
+        assert (out / 'best_run.json').exists(), where
+        assert shown == [False], (where, shown)            # the best run was shown once, visibly
+        IM.show_best(link, track_id=tid)                    # the connection is still in sync
+        print(f'OK: stopped in {where}: best run saved and shown, link still in sync')
     game.stop_flag = True
     print('OK: improve ran rounds, fine-tuned, exported and played back')
 

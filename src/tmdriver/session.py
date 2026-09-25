@@ -14,6 +14,8 @@ import threading
 import time
 from typing import List, Optional
 
+import numpy as np
+
 from . import protocol as P
 from .link import Link, MapInfo
 from .paths import CALIBRATION, LIVE_MAPS, safe
@@ -45,9 +47,16 @@ def focus_game_window() -> bool:
     user32.EnumWindows(cb, 0)
     if not found:
         return False
+    h = found[0]
+    if user32.GetForegroundWindow() == h:
+        return True
+    if user32.IsIconic(h):
+        user32.ShowWindow(h, 9)             # SW_RESTORE: a minimized game gets no focus
     user32.keybd_event(0x12, 0, 0, 0)       # an ALT tap lets a background process take focus
     user32.keybd_event(0x12, 0, 2, 0)
-    return bool(user32.SetForegroundWindow(found[0]))
+    user32.SetForegroundWindow(h)
+    time.sleep(0.3)                         # measured: the switch is not immediate
+    return user32.GetForegroundWindow() == h
 
 
 class Episode:
@@ -70,19 +79,21 @@ class Episode:
 
 
 class GasProbe(Episode):
-    """Full throttle for one second from the race start: does the car move?"""
+    """Full throttle for one second from the race start: does the car move? Judged by the
+    distance driven; the speedometer (display_speed) is logged as well."""
 
     def begin(self, start):
-        self.kmh = 0
+        self.kmh, self.moved, self.p0 = 0, 0.0, np.asarray(start.pos, dtype=np.float64)
 
     def act(self, st):
         if st.race_time >= 1000 or st.finished:
             self.kmh = int(st.display_speed)
+            self.moved = float(np.linalg.norm(np.asarray(st.pos, dtype=np.float64) - self.p0))
             return None
         return 0, 0, P.UP
 
     def result(self):
-        return {'kmh': self.kmh}
+        return {'kmh': self.kmh, 'moved_m': self.moved}
 
 
 class GameSession:
@@ -101,6 +112,7 @@ class GameSession:
             threading.Thread(target=self._pump, args=(link,), daemon=True).start()
         self.q = link._pump_q
         self._held = None      # the start STEP while the plugin is kept waiting (run(keep=True))
+        self.focus = True      # bring the game window to the front for map loads (main instance)
         link.strict = True     # one ACTION per STEP, checked (see Link.owed)
         # No "Press any key to continue" / opponent screens between map loads (TMInterface
         # variable; without it cheatoskar had to press Enter on every map).
@@ -169,20 +181,39 @@ class GameSession:
         only processed while the game window has focus. Hence: focus the game, send ONE
         command (a queue of fallbacks would fire later and load the wrong map), wait for the
         MAP that the plugin sends when the new race starts."""
+        if self.map is not None and self.map.uid == uid:
+            return True                     # already open; the runs restart the race themselves
         known = self.calib.data.get('map_command_template')
-        templates = [known] if known else ['TMDriver\\{f}', 'TMDriver/{f}', 'Challenges\\TMDriver\\{f}']
+        # Only the form measured on 2026-09-24. The fallback forms got queued as well and could load
+        # a map much later, in the middle of a run (seen 2026-09-25 on the home PC).
+        templates = [known or 'TMDriver\\{f}']
         for tpl in templates:
-            focus_game_window()
+            if self.focus:
+                focus_game_window()
             self._drain()
             form = tpl.format(f=map_file)
             self.link.execute(f'map "{form}"')
             self.link.flush()
-            deadline = time.monotonic() + self.MAP_TIMEOUT_S
+            t_sent = time.monotonic()
+            deadline = t_sent + self.MAP_TIMEOUT_S
+            warned = hinted = False
             while time.monotonic() < deadline:
                 try:
-                    kind, payload = self.next(timeout=max(0.1, deadline - time.monotonic()))
+                    kind, payload = self.next(timeout=min(3.0, max(0.1, deadline - time.monotonic())))
                 except TimeoutError:
-                    break
+                    # Nothing yet. In the menu the game only loads while it has focus, and a job
+                    # console that opened meanwhile may have taken it: bring the game back.
+                    focused = focus_game_window() if self.focus else True
+                    if not focused and not warned:
+                        self.log('  waiting for the map: please click into the game window once '
+                                 '(Windows did not let Python bring it to the front)')
+                        warned = True
+                    if not hinted and time.monotonic() - t_sent > 30:
+                        self.log('  the map has not loaded after 30 s (TMI only queues it). In the game: '
+                                 'close any open dialog, go to the main menu or into a race, and click '
+                                 'into the window')
+                        hinted = True
+                    continue
                 if kind == P.P_STEP:
                     self.link.action(0, 0, 0)
                 if kind == P.P_MAP:
@@ -220,6 +251,32 @@ class GameSession:
         finally:
             stop.set()
             t.join()
+
+    def recover(self):
+        """After a run was interrupted (Ctrl+C in the console, Stop in the game): rendering on,
+        plugin idle, and every STEP it still waits for answered exactly once."""
+        link = self.link
+        self._held = None
+        # Not answered yet: the plugin sends one STEP and then waits, so at most one is open (the
+        # one being handled, or one still queued). It may be a finished race: answering it plainly
+        # leaves the game on the finish (no more STEPs, the medal screen), so restart the race first.
+        while True:
+            try:
+                kind, payload = self.q.get_nowait()
+            except queue.Empty:
+                break
+            if kind == 'error':
+                raise ConnectionError(payload)
+            if kind == P.P_MAP:
+                self.link._last_map = payload
+        link.sim_only(False)
+        link.speed(1.0)
+        link.mode(P.MODE_IDLE)
+        if link.owed > 0:
+            link.restart()
+            for _ in range(link.owed):
+                link.action(0, 0, 0)
+        link.flush()
 
     def release(self):
         """End a kept session: back to the start, rendering on, plugin idle."""
@@ -336,13 +393,13 @@ class GameSession:
         one second of full throttle; if the car does not move, let the game run normally for a
         few seconds and try again."""
         for k in range(tries):
-            kmh = self.run([GasProbe()], sim_only=True)[0]['kmh']
-            if kmh >= 5:
+            r = self.run([GasProbe()], sim_only=True)[0]
+            txt = f"{r['moved_m']:.1f} m, {r['kmh']} km/h after 1 s of throttle"
+            if r['moved_m'] >= 3.0:
                 if k:
-                    self.log(f'  the car moves now ({kmh} km/h after 1 s of throttle)')
+                    self.log(f'  the car moves now ({txt})')
                 return True
-            self.log(f'  the car does not move yet ({kmh} km/h after 1 s of throttle): '
-                     f'letting the game run for {wait_s:.0f} s ...')
+            self.log(f'  the car does not move yet ({txt}): letting the game run for {wait_s:.0f} s ...')
             self.status('Waiting for the race to become drivable ...')
             time.sleep(wait_s)
         self.log('  WARNING: the car still does not move. Click into the game or press Enter, then retry.')

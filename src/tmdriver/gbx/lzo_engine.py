@@ -42,7 +42,118 @@ def _init_lzo():
     except ImportError:
         pass
 
-    return None
+    # Last resort: the pure-Python decompressor below (slower; no compression)
+    return "pure"
+
+
+def _py_decompress(src: bytes, out_len: int) -> bytes:
+    """LZO1X decompression in pure Python, following the reference lzo1x_decompress_safe.
+    Used only when neither the DLL nor python-lzo is available (e.g. no python-lzo wheel for
+    the Python version). Maps and replays are small, so the speed does not matter."""
+    src = memoryview(src)
+    n = len(src)
+    out = bytearray()
+    ip = 0
+
+    def ext(base):
+        nonlocal ip
+        t = 0
+        while src[ip] == 0:
+            t += 255
+            ip += 1
+        t += base + src[ip]
+        ip += 1
+        return t
+
+    def copy_match(dist, count):
+        start = len(out) - dist
+        if start < 0:
+            raise ValueError('LZO: match before the start of the output')
+        for k in range(count):              # byte by byte: matches may overlap the output end
+            out.append(out[start + k])
+
+    state = 'loop'
+    t = 0
+    if src[0] > 17:
+        t = src[0] - 17
+        ip = 1
+        if t < 4:
+            state = 'match_next'
+        else:
+            out += src[ip:ip + t]
+            ip += t
+            state = 'first_literal_run'
+    while True:
+        if state == 'loop':
+            t = src[ip]
+            ip += 1
+            if t >= 16:
+                state = 'match'
+                continue
+            if t == 0:
+                t = ext(15)
+            out += src[ip:ip + t + 3]
+            ip += t + 3
+            state = 'first_literal_run'
+            continue
+        if state == 'first_literal_run':
+            t = src[ip]
+            ip += 1
+            if t >= 16:
+                state = 'match'
+                continue
+            dist = 1 + 0x0800 + (t >> 2) + (src[ip] << 2)
+            ip += 1
+            copy_match(dist, 3)
+            state = 'match_done'
+            continue
+        if state == 'match':
+            if t >= 64:
+                dist = 1 + ((t >> 2) & 7) + (src[ip] << 3)
+                ip += 1
+                copy_match(dist, (t >> 5) - 1 + 2)
+            elif t >= 32:
+                t &= 31
+                if t == 0:
+                    t = ext(31)
+                dist = 1 + (src[ip] >> 2) + (src[ip + 1] << 6)
+                ip += 2
+                copy_match(dist, t + 2)
+            elif t >= 16:
+                dist = (t & 8) << 11
+                t &= 7
+                if t == 0:
+                    t = ext(7)
+                dist += (src[ip] >> 2) + (src[ip + 1] << 6)
+                ip += 2
+                if dist == 0:
+                    break                   # end of stream
+                copy_match(dist + 0x4000, t + 2)
+            else:
+                dist = 1 + (t >> 2) + (src[ip] << 2)
+                ip += 1
+                copy_match(dist, 2)
+            state = 'match_done'
+            continue
+        if state == 'match_done':
+            t = src[ip - 2] & 3
+            if t == 0:
+                state = 'loop'
+                continue
+            state = 'match_next'
+            continue
+        if state == 'match_next':
+            out += src[ip:ip + t]
+            ip += t
+            t = src[ip]
+            ip += 1
+            state = 'match'
+            continue
+    if ip != n:
+        raise ValueError(f'LZO: {n - ip} input bytes left after the end marker')
+    if len(out) != out_len:
+        raise ValueError(f'LZO: {len(out)} bytes decompressed, {out_len} expected')
+    return bytes(out)
 
 def decompress(data: bytes, *args) -> bytes:
     """
@@ -62,6 +173,8 @@ def decompress(data: bytes, *args) -> bytes:
     if lib == "python-lzo":
         import lzo
         return lzo.decompress(data, False, uncompressed_size)
+    if lib == "pure":
+        return _py_decompress(data, uncompressed_size)
 
     out_buf = bytes(uncompressed_size)
     c_size = c_uint32(len(data))
@@ -80,7 +193,7 @@ def compress(data: bytes, *args) -> bytes:
       compress(data, 1, False) (python-lzo compatibility)
     """
     lib = _init_lzo()
-    if lib is None:
+    if lib in (None, "pure"):
         raise RuntimeError("No LZO compression engine available! Ensure lzo1x_64.dll is in src/gbx/lib/")
 
     if lib == "python-lzo":

@@ -56,6 +56,8 @@ def serve(args):
             sys.exit(f'model not found: {ckpt}')
         os.environ['TMDRIVER_CKPT'] = str(ckpt)
         print(f'model: {ckpt}')
+    if args.line:
+        os.environ['TMDRIVER_LINE'] = '1'     # 'AI drive (live)' uses the reference line
     from tmdriver.server import serve as run
     run(port=args.port)
 
@@ -85,8 +87,31 @@ def _link(args):
 
 def resim(args):
     from tmdriver.resim import run_resim
-    run_resim(_link(args), only_missing=not args.all, max_replays=args.replays, limit=args.limit,
-              source=args.source, start=args.start, hours=args.hours, batch=not args.per_tick)
+    source, ids = args.source, []
+    if args.maps:
+        source, ids = 'tmx', [int(x) for x in args.maps.replace(' ', '').split(',') if x]
+    elif args.map is not None:
+        from tmdriver.bulk import MAPS_LOG
+        # the button: a TMX id, or 0 = the whole bulk list if downloaded, else the open map
+        source = 'bulk' if args.map == 0 and MAPS_LOG.exists() else 'tmx'
+        ids = [args.map]
+    link = _link(args)
+    from tmdriver.instances import connect_helpers
+    helpers = connect_helpers(args.port) if args.helpers == 'auto' else []
+    run_resim(link, only_missing=not args.all, max_replays=args.replays, limit=args.limit,
+              source=source, start=args.start, hours=args.hours, batch=not args.per_tick,
+              track_ids=ids, helpers=helpers)
+
+
+def launch(args):
+    from tmdriver.instances import launch_helpers
+    link = _link(args)
+
+    def status(text):
+        link.status(text)
+        link.flush()
+
+    launch_helpers(args.helpers, base=args.port, status=status)
 
 
 def build(args):
@@ -125,7 +150,7 @@ def pretrain(args):
 def improve(args):
     from tmdriver.improve import improve as run
     run(_link(args), track_id=args.map, rounds=args.rounds, episodes=args.episodes, show=not args.no_show,
-        ckpt=args.model or None, branch=args.branch, seed=args.seed)
+        ckpt=args.model or None, branch=args.branch, seed=args.seed, use_line=args.line)
 
 
 def show(args):
@@ -135,12 +160,32 @@ def show(args):
 
 def drive(args):
     from tmdriver.improve import drive_preview
-    drive_preview(_link(args), track_id=args.map, speed=args.speed, ckpt=args.model or None, plans=args.plans)
+    drive_preview(_link(args), track_id=args.map, speed=args.speed, ckpt=args.model or None, plans=args.plans,
+                  use_line=args.line)
 
 
 def ghost_replays(args):
     from tmdriver.replaybuild import build_all
     build_all(workers=args.workers, rebuild=args.rebuild)
+
+
+GAME_COMMANDS = {'resim', 'improve', 'drive', 'show', 'eval', 'launch'}
+
+
+def serve_running() -> bool:
+    """Another `tmdriver.py serve` process on this PC (Windows; best effort, False if unknown).
+    Seen 2026-09-25: a running serve reconnected and took the connection from a resim run."""
+    if os.name != 'nt':
+        return False
+    import subprocess
+    try:
+        out = subprocess.run(['powershell', '-NoProfile', '-Command',
+                              "Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | "
+                              "ForEach-Object { $_.CommandLine }"],
+                             capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return False
+    return any('tmdriver.py' in line and ' serve' in line for line in out.splitlines())
 
 
 def main():
@@ -151,6 +196,7 @@ def main():
     s = sub.add_parser('serve')
     s.add_argument('--port', type=int, default=P.PORT)
     s.add_argument('--model', default='', help="ghost | ghost-latest (pretrained) | best | last (M1) | path")
+    s.add_argument('--line', action='store_true', help="'AI drive (live)' with the reference line (default: blocks only)")
     s.set_defaults(fn=serve)
     f = sub.add_parser('fetch-tmx')
     f.add_argument('ids', type=int, nargs='+')
@@ -166,6 +212,10 @@ def main():
     r.add_argument('--all', action='store_true', help='redo replays that were already simulated')
     r.add_argument('--limit', type=int, default=0, help='only the first N maps (trial run)')
     r.add_argument('--source', default='m1', help='m1 (80-map manifest) | bulk (data/bulk/maps.jsonl -> data/resim)')
+    r.add_argument('--map', type=int, default=None,
+                   help='one TMX map (fetched if needed); 0 = the bulk list if downloaded, else the open map')
+    r.add_argument('--maps', default='', help='comma-separated TMX ids, done one after the other (fetched if needed)')
+    r.add_argument('--helpers', default='auto', help='auto: also use every running helper instance | 0: main only')
     r.add_argument('--start', type=int, default=0, help='skip the first N maps (split work between games)')
     r.add_argument('--hours', type=float, default=0.0, help='stop after this long')
     r.add_argument('--per-tick', action='store_true',
@@ -228,6 +278,7 @@ def main():
                     help='runs per round that start shortly before where the best run got stuck (0 = off)')
     im.add_argument('--seed', type=int, default=None, help='random seed (default: a new one each time)')
     im.add_argument('--no-show', action='store_true', help='do not show new best runs in the game')
+    im.add_argument('--line', action='store_true', help='give the model the reference line (fastest TMX replay; fetched if missing). Default: blocks only')
     im.add_argument('--port', type=int, default=P.PORT)
     im.set_defaults(fn=improve)
     sh = sub.add_parser('show', help='play the best run that improve found on this map')
@@ -240,8 +291,13 @@ def main():
     dv.add_argument('--speed', type=float, default=1.0)
     dv.add_argument('--plans', type=int, default=12, help='planned runs (1 greedy + sampled); the best is driven')
     dv.add_argument('--model', default='')
+    dv.add_argument('--line', action='store_true', help='give the model the reference line (fastest TMX replay; fetched if missing). Default: blocks only')
     dv.add_argument('--port', type=int, default=P.PORT)
     dv.set_defaults(fn=drive)
+    la = sub.add_parser('launch', help='start more game instances (helpers) and wait until they listen')
+    la.add_argument('--helpers', type=int, default=2)
+    la.add_argument('--port', type=int, default=P.PORT)
+    la.set_defaults(fn=launch)
     gr = sub.add_parser('ghost-replays', help='stage A2: TMX replays -> shards with orientation (no game needed)')
     gr.add_argument('--workers', type=int, default=4)
     gr.add_argument('--rebuild', action='store_true')
@@ -249,6 +305,9 @@ def main():
     args = ap.parse_args()
     os.environ['TMDRIVER_DEVICE'] = args.device
     done = os.environ.get('TMDRIVER_JOB_DONE_FILE')
+    if not done and args.cmd in GAME_COMMANDS and serve_running():
+        sys.exit('TMDriver_starten.bat (serve) is running: it would take the game connection away from '
+                 'this command. Close its window first, or use the buttons in the game instead.')
     if not done:
         args.fn(args)
         return

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-PROTOCOL = 8
+PROTOCOL = 11
 HOST = '127.0.0.1'
 PORT = 8478
 
@@ -20,9 +20,10 @@ P_UI = 4      # int mode, float speed        (a window button was pressed)
 P_BENCH = 5   # int ticks, int elapsed_ms, int race_time
 P_PING = 6    # -  (heartbeat while idle; ignore)
 P_TREC = 7    # STEP struct: one tick of batch playback (no answer)
-P_JOB = 9     # int job, int TMX id (0 = current map), int rounds, int hours, int flags (tool button)
-JOB_DRIVE, JOB_TRAIN, JOB_RESIM, JOB_SHOW = 1, 2, 3, 4   # P_JOB: ..., int minutes, ...
-JOB_GPU, JOB_PER_TICK = 1, 2
+P_JOB = 9     # int job, int TMX id (0 = current map), int rounds, int minutes, int flags,
+              # str game folder (TMI variable tmdriver_game_folder; '' = detect)   (tool button)
+JOB_DRIVE, JOB_TRAIN, JOB_RESIM, JOB_SHOW, JOB_LAUNCH = 1, 2, 3, 4, 5   # LAUNCH: rounds = helpers   # P_JOB: ..., int minutes, ...
+JOB_GPU, JOB_PER_TICK, JOB_LINE, JOB_SHOW_BEST = 1, 2, 4, 8   # P_JOB flags
 P_TEND = 8    # int reason (0 end of inputs, 1 finish, 2 frozen race time), int race time
 
 # python -> plugin

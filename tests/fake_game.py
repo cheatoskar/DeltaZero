@@ -499,8 +499,8 @@ class FakeGame(threading.Thread):
         self.accepts += 1
         self.send(struct.pack('<ii', P.P_HELLO, P.PROTOCOL))
 
-    def press_job(self, job, track_id=0, rounds=20, hours=3, flags=1):
-        self.job_queue.append((job, track_id, rounds, hours, flags))
+    def press_job(self, job, track_id=0, rounds=20, hours=3, flags=1, game_dir=''):
+        self.job_queue.append((job, track_id, rounds, hours, flags, game_dir))
 
     def render(self):
         if self.reconnect:
@@ -508,7 +508,9 @@ class FakeGame(threading.Thread):
             if self.client is None:
                 return
         while self.job_queue:
-            self.send(struct.pack('<6i', P.P_JOB, *self.job_queue.pop(0)))
+            *ints, gdir = self.job_queue.pop(0)
+            raw = gdir.encode()
+            self.send(struct.pack('<6i', P.P_JOB, *ints) + struct.pack('<i', len(raw)) + raw)
         while self.ui_queue:
             m = self.ui_queue.pop(0)
             if m != P.MODE_IDLE:

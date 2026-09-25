@@ -99,7 +99,7 @@ class Link:
         if t == P.P_TEND:
             return t, (self._int(), self._int())
         if t == P.P_JOB:
-            return t, tuple(self._int() for _ in range(5))
+            return t, tuple(self._int() for _ in range(5)) + (self._str(),)
         if t == P.P_PING:
             return t, ()
         if t == P.P_HELLO:

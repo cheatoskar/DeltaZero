@@ -12,9 +12,10 @@
 //   DRIVE   a STEP is sent every tick and the plugin waits for Python's ACTION
 //   TEST    like DRIVE; Python runs the self test (simulation-only speed, determinism)
 
-const int PROTOCOL = 8;
+const int PROTOCOL = 11;
 const string HOST = "127.0.0.1";
-const uint16 PORT = 8478;
+const uint16 PORT = 8478;      // the main instance; helpers take the next free ports
+const int MAX_INSTANCES = 8;   // (Python: instances.MAX_INSTANCES)
 const uint STEP_TIMEOUT_MS = 5000;
 
 // plugin -> python
@@ -32,6 +33,7 @@ const int JOB_DRIVE = 1;
 const int JOB_TRAIN = 2;
 const int JOB_RESIM = 3;
 const int JOB_SHOW = 4;
+const int JOB_LAUNCH = 5;      // start more game instances (rounds field = how many)
 const int P_TEND = 8;     // batch playback finished: int reason (0 end of inputs, 1 finish, 2 frozen time), int race time
 
 // python -> plugin
@@ -75,6 +77,8 @@ int jobRounds = 20;
 float jobHours = 3.0f;
 bool jobGpu = true;
 bool jobPerTick = false;
+bool jobLine = false;     // give the AI the reference line (fastest TMX replay)
+bool jobShowBest = true;  // Train: show every new best run in the game
 
 // Requests made outside a physics step are applied at the start of the next OnRunStep.
 bool pendingRestart = false;
@@ -102,6 +106,8 @@ void ClearDrawn()
 int pendingSimOnly = -1;
 
 string sentUid = "";
+int listenPort = -1;
+int jobHelpers = 2;
 int lastRaceTime = -1000000;
 bool finishSent = false;
 array<SimulationState@> slots(8);   // NUM_SLOTS
@@ -126,11 +132,24 @@ PluginInfo@ GetPluginInfo()
 
 void Main()
 {
-    @server = Net::Socket();
-    if (server.Listen(HOST, PORT)) {
-        log("TMDriver: listening on " + HOST + ":" + int(PORT));
+    // the game's user folder (with Tracks\Challenges), '' = Python detects it.
+    // Set it in the TMI console: set tmdriver_game_folder C:\Users\...\Documents\TrackMania
+    RegisterVariable("tmdriver_game_folder", "");
+    // Several game instances: each takes the first free port (the first one started is the
+    // main instance on PORT, helpers get PORT + 1, + 2, ...; Python finds them by trying).
+    for (int k = 0; k < MAX_INSTANCES; k++) {
+        @server = Net::Socket();
+        if (server.Listen(HOST, uint16(PORT + k))) {
+            listenPort = PORT + k;
+            break;
+        }
+        @server = null;
+    }
+    if (server !is null) {
+        log("TMDriver: listening on " + HOST + ":" + listenPort
+            + (listenPort == PORT ? " (main instance)" : " (helper instance)"));
     } else {
-        log("TMDriver: could not listen on port " + int(PORT), Severity::Error);
+        log("TMDriver: no free port from " + int(PORT), Severity::Error);
     }
 }
 
@@ -184,13 +203,14 @@ void WriteStr(const string&in s)
 void SendJob(int job)
 {
     if (client is null) return;
-    int flags = (jobGpu ? 1 : 0) | (jobPerTick ? 2 : 0);
+    int flags = (jobGpu ? 1 : 0) | (jobPerTick ? 2 : 0) | (jobLine ? 4 : 0) | (jobShowBest ? 8 : 0);
     client.Write(P_JOB);
     client.Write(job);
     client.Write(jobMap);
     client.Write(jobRounds);
     client.Write(int(jobHours * 60.0f + 0.5f));
     client.Write(flags);
+    WriteStr(GetVariableString("tmdriver_game_folder"));
     status = "Job started: a console window opens ...";
 }
 
@@ -694,6 +714,9 @@ void Render()
 
     if (UI::Begin("DeltaZero")) {
         UI::Text(client is null ? "Python: not connected" : "Python: connected (" + ModeName(mode) + ")");
+        if (listenPort != int(PORT)) {
+            UI::TextWrapped("Helper instance (port " + listenPort + "): the main window starts the jobs.");
+        }
         UI::TextWrapped(status);
         if (client is null) {
             UI::TextWrapped("Start 'TMDriver_starten.bat' in the TMDriverAI folder first.");
@@ -702,8 +725,17 @@ void Render()
         jobMap = UI::InputInt("Map (TMX id)", jobMap, 0);
         if (jobMap < 0) jobMap = 0;
         Tip("0 = the map that is loaded now. Otherwise the TMX id, e.g. 10036840 for lolsport.");
+        string gameFolder = GetVariableString("tmdriver_game_folder");
+        UI::TextWrapped("Game folder: " + (gameFolder == "" ? "auto" : gameFolder));
+        Tip("Where the game keeps Tracks\\Challenges (maps are downloaded there). auto = Python picks "
+            "Documents\\TmForever or Documents\\TrackMania, whichever was used last. To set it, type in the "
+            "TMI console: set tmdriver_game_folder C:\\Users\\<you>\\Documents\\TrackMania");
         jobGpu = UI::Checkbox("Use GPU (CUDA)", jobGpu);
         Tip("Off = CPU. The laptop has no CUDA GPU.");
+        jobLine = UI::Checkbox("Use reference line (TMX replay)", jobLine);
+        Tip("On: the AI sees the line of the fastest TMX replay of this map (downloaded if needed) "
+            "and follows it. Off: it drives from the blocks alone; progress then counts the track "
+            "blocks reached and the checkpoints.");
         UI::BeginDisabled(client is null || mode != MODE_IDLE);
         if (UI::Button("Drive")) SendJob(JOB_DRIVE);
         Tip("The AI drives the map once without rendering (the game freezes briefly), draws its "
@@ -714,6 +746,9 @@ void Render()
         jobRounds = UI::SliderInt("Rounds", jobRounds, 1, 200);
         Tip("Training rounds. Each round: 7 runs (1 normal + 6 with random variations), then the AI "
             "learns from the best ones. The game stays frozen while it trains.");
+        jobShowBest = UI::Checkbox("Show new best runs", jobShowBest);
+        Tip("Train: after a round with a new best run, drive it visibly in the game. Respawn while it "
+            "is shown skips it and the next round starts at once.");
         if (UI::Button("Train")) SendJob(JOB_TRAIN);
         Tip("The AI practises this map and gets faster. Every new best run is shown in the game, "
             "then training continues.");
@@ -725,6 +760,19 @@ void Render()
         UI::EndDisabled();
         UI::TextWrapped("Each button opens a console with live progress.");
 
+        if (UI::CollapsingHeader("Helper instances")) {
+            jobHelpers = UI::SliderInt("Helpers", jobHelpers, 1, MAX_INSTANCES - 1);
+            UI::BeginDisabled(client is null || mode != MODE_IDLE);
+            if (UI::Button("Launch helpers")) {
+                int saved = jobRounds;
+                jobRounds = jobHelpers;
+                SendJob(JOB_LAUNCH);
+                jobRounds = saved;
+            }
+            Tip("Starts more game instances (TMLoader profile DeltaZero). Log in to each; the status "
+                "line here shows how many are ready. Re-simulate then uses all of them.");
+            UI::EndDisabled();
+        }
         if (UI::CollapsingHeader("Data: re-simulate replays")) {
             jobHours = UI::SliderFloat("Hours", jobHours, 0.1f, 24.0f, "%.1f h");
             jobPerTick = UI::Checkbox("Per-tick mode (slower, verified)", jobPerTick);
@@ -732,8 +780,9 @@ void Render()
                 "answers every tick; use it if batch mode reports runs that are not exact.");
             UI::BeginDisabled(client is null || mode != MODE_IDLE);
             if (UI::Button("Re-simulate replays")) SendJob(JOB_RESIM);
-            Tip("Plays the downloaded TMX replays in the game and saves the full physics state "
-                "(data/resim). Stops after the hours above.");
+            Tip("Plays TMX replays in the game and saves the full physics state (data/resim). "
+                "Map (TMX id) > 0: that map and its 5 fastest replays (downloaded if needed). 0: all "
+                "downloaded maps if the bulk list exists, else the open map. Stops after the hours above.");
             UI::EndDisabled();
         }
         if (UI::CollapsingHeader("Advanced")) {
