@@ -23,6 +23,7 @@ def torch_device() -> str:
         import torch
         return 'cuda' if torch.cuda.is_available() else 'cpu'
     return d
+POOL = DATA / 'pool' / 'maps.json'   # map pool from the TMX search (tmx-pool), for resim and RL
 TMX = DATA / 'tmx'              # TMX replays by map uid, for the self test
 
 

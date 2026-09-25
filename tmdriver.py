@@ -20,6 +20,7 @@ import argparse
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'src'))
@@ -87,12 +88,20 @@ def _link(args):
 
 def resim(args):
     from tmdriver.resim import run_resim
+    import json
+    from tmdriver.bulk import MAPS_LOG
+    from tmdriver.paths import POOL
     source, ids = args.source, []
     if args.maps:
         source, ids = 'tmx', [int(x) for x in args.maps.replace(' ', '').split(',') if x]
+    elif args.pool or (args.map == 0 and not MAPS_LOG.exists() and POOL.exists()):
+        if not POOL.exists():
+            sys.exit(f'no map pool yet ({POOL}): run `python tmdriver.py tmx-pool` first')
+        source = 'tmx'
+        ids = [m['track_id'] for m in json.loads(POOL.read_text(encoding='utf-8'))['maps']]
+        print(f'map pool: {len(ids)} maps from {POOL}')
     elif args.map is not None:
-        from tmdriver.bulk import MAPS_LOG
-        # the button: a TMX id, or 0 = the whole bulk list if downloaded, else the open map
+        # the button: a TMX id, or 0 = the bulk list if downloaded, else the pool, else the open map
         source = 'bulk' if args.map == 0 and MAPS_LOG.exists() else 'tmx'
         ids = [args.map]
     link = _link(args)
@@ -101,6 +110,20 @@ def resim(args):
     run_resim(link, only_missing=not args.all, max_replays=args.replays, limit=args.limit,
               source=source, start=args.start, hours=args.hours, batch=not args.per_tick,
               track_ids=ids, helpers=helpers)
+
+
+def tmx_pool(args):
+    import json
+    from tmdriver import tmx
+    from tmdriver.collect import holdout
+    from tmdriver.paths import POOL
+    maps = tmx.search_tracks(args.maps, int(args.min * 1000), int(args.max * 1000))
+    for m in maps:
+        m['holdout'] = holdout(m['track_id'])      # never trained on (evaluation), same hash as collect
+    POOL.parent.mkdir(parents=True, exist_ok=True)
+    POOL.write_text(json.dumps({'made': time.strftime('%Y-%m-%d %H:%M'), 'min_s': args.min, 'max_s': args.max,
+                                'maps': maps}, indent=1), encoding='utf-8')
+    print(f"{len(maps)} maps ({sum(m['holdout'] for m in maps)} held out) -> {POOL}")
 
 
 def launch(args):
@@ -218,6 +241,7 @@ def main():
     r.add_argument('--map', type=int, default=None,
                    help='one TMX map (fetched if needed); 0 = the bulk list if downloaded, else the open map')
     r.add_argument('--maps', default='', help='comma-separated TMX ids, done one after the other (fetched if needed)')
+    r.add_argument('--pool', action='store_true', help='every map of the TMX map pool (tmx-pool), fetched as it goes')
     r.add_argument('--helpers', default='auto', help='auto: also use every running helper instance | 0: main only')
     r.add_argument('--start', type=int, default=0, help='skip the first N maps (split work between games)')
     r.add_argument('--hours', type=float, default=0.0, help='stop after this long')
@@ -298,6 +322,11 @@ def main():
     dv.add_argument('--line', action='store_true', help='give the model the reference line (fastest TMX replay; fetched if missing). Default: blocks only')
     dv.add_argument('--port', type=int, default=P.PORT)
     dv.set_defaults(fn=drive)
+    tp = sub.add_parser('tmx-pool', help='map pool from the TMX search: most awarded maps in a time range')
+    tp.add_argument('--maps', type=int, default=2000)
+    tp.add_argument('--min', type=float, default=5.0, help='minimum author time in seconds')
+    tp.add_argument('--max', type=float, default=60.0, help='maximum author time in seconds')
+    tp.set_defaults(fn=tmx_pool)
     la = sub.add_parser('launch', help='start more game instances (helpers) and wait until they listen')
     la.add_argument('--helpers', type=int, default=2)
     la.add_argument('--port', type=int, default=P.PORT)

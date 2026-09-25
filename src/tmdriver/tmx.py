@@ -61,6 +61,30 @@ def track_id_by_uid(uid: str):
     return None
 
 
+def search_tracks(n: int, min_ms: int = 5000, max_ms: int = 60000, exclude_tags=(1, 10),
+                  log=print) -> List[Dict]:
+    """The n most awarded maps with an author time in [min_ms, max_ms], without the excluded
+    TMX tags (1 stunt and 10 press-forward: nothing to learn for a driver, as in bulk.py).
+    Search parameters checked 2026-09-25: order1=6 sorts by awards (descending), authortimemin
+    / authortimemax filter, etag excludes tags, after=<TrackId> continues a page."""
+    base = (f'{BASE}/api/tracks?fields=TrackId,TrackName,UId,AuthorTime,Awards,Tags&order1=6'
+            f'&authortimemin={int(min_ms)}&authortimemax={int(max_ms)}&count=100')
+    if exclude_tags:
+        base += '&etag=' + ','.join(str(int(t)) for t in exclude_tags)
+    out, after = [], None
+    while len(out) < n:
+        d = json.loads(get(base + (f'&after={after}' if after else '')))
+        rs = d.get('Results', [])
+        for r in rs:
+            out.append({'track_id': int(r['TrackId']), 'name': r.get('TrackName', ''), 'uid': r.get('UId', ''),
+                        'author_ms': r.get('AuthorTime'), 'awards': r.get('Awards'), 'tags': r.get('Tags') or []})
+        log(f'  {len(out)} maps ...')
+        if not rs or not d.get('More'):
+            break
+        after = rs[-1]['TrackId']
+    return out[:n]
+
+
 def replay_list(track_id: int, count: int = 25) -> List[Dict]:
     d = json.loads(get(f'{BASE}/api/replays?trackId={track_id}&count={count}'
                        f'&fields=ReplayId,ReplayTime,Position,User.Name'))

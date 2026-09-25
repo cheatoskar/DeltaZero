@@ -123,8 +123,9 @@ def fetch_entry(track_id: int, n_replays: int, log=print) -> dict:
     """Map + fastest replays from TMX (files already there are not downloaded again)."""
     from . import tmx
     res = tmx.fetch(track_id, n_replays, TMX, safe, log=lambda *a: None)
+    from .collect import holdout
     return {'ok': True, 'track_id': track_id, 'uid': res['uid'], 'name': res['info']['TrackName'],
-            'map_file': res['map'].name, 'holdout': False,
+            'map_file': res['map'].name, 'holdout': holdout(track_id),
             'replays': [{'file': p.name, 'path': str(p)} for p in res['replays']]}
 
 
