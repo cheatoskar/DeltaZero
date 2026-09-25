@@ -125,7 +125,7 @@ def pretrain(args):
 def improve(args):
     from tmdriver.improve import improve as run
     run(_link(args), track_id=args.map, rounds=args.rounds, episodes=args.episodes, show=not args.no_show,
-        ckpt=args.model or None)
+        ckpt=args.model or None, branch=args.branch)
 
 
 def show(args):
@@ -135,7 +135,7 @@ def show(args):
 
 def drive(args):
     from tmdriver.improve import drive_preview
-    drive_preview(_link(args), track_id=args.map, speed=args.speed, ckpt=args.model or None)
+    drive_preview(_link(args), track_id=args.map, speed=args.speed, ckpt=args.model or None, plans=args.plans)
 
 
 def ghost_replays(args):
@@ -223,6 +223,8 @@ def main():
     im.add_argument('--rounds', type=int, default=20)
     im.add_argument('--episodes', type=int, default=6, help='sampled runs per round (+1 greedy)')
     im.add_argument('--model', default='', help='checkpoint (default: as serve)')
+    im.add_argument('--branch', type=int, default=8,
+                    help='runs per round that start shortly before where the best run got stuck (0 = off)')
     im.add_argument('--no-show', action='store_true', help='do not show new best runs in the game')
     im.add_argument('--port', type=int, default=P.PORT)
     im.set_defaults(fn=improve)
@@ -234,6 +236,7 @@ def main():
     dv = sub.add_parser('drive', help='plan the line (drawn in the game), then drive it (serve must NOT run)')
     dv.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
     dv.add_argument('--speed', type=float, default=1.0)
+    dv.add_argument('--plans', type=int, default=12, help='planned runs (1 greedy + sampled); the best is driven')
     dv.add_argument('--model', default='')
     dv.add_argument('--port', type=int, default=P.PORT)
     dv.set_defaults(fn=drive)

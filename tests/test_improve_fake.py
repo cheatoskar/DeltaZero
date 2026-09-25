@@ -55,8 +55,21 @@ def main():
         return orig_run(self, eps, sim_only, batch, keep)
 
     IM.GameSession.run = run
-    hist = IM.improve(link, track_id=tid, rounds=3, episodes=3, steps=5, bs=64)
-    IM.fine_tune, IM.GameSession.run = orig_ft, orig_run
+    prefixes = []
+    orig_pre = IM.PrefixEpisode.result
+
+    def pre_result(self):
+        r = orig_pre(self)
+        prefixes.append(r)
+        return r
+
+    IM.PrefixEpisode.result = pre_result
+    hist = IM.improve(link, track_id=tid, rounds=3, episodes=3, steps=5, bs=64, branch=4)
+    IM.fine_tune, IM.GameSession.run, IM.PrefixEpisode.result = orig_ft, orig_run, orig_pre
+    assert prefixes and all(r['diverged_m'] is not None and r['diverged_m'] < 1e-3 for r in prefixes), prefixes
+    assert all(h['branch_from_s'] for h in hist[1:]), [h['branch_from_s'] for h in hist]
+    print(f"branching: rounds 2-3 started {4} runs from {[h['branch_from_s'] for h in hist[1:]]} s; "
+          f"replaying the best run to there was exact ({[round(r['diverged_m'], 6) for r in prefixes]} m)")
     assert shown and not any(shown), f'best runs must be shown visibly: {shown}'
     print(f'best run shown {len(shown)}x (every new best + the final one)')
     print('history:', [(h['round'], h['greedy'], h['finished'], h['best_ms'], h['best_progress_m']) for h in hist])

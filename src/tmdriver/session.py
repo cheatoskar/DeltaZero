@@ -51,7 +51,8 @@ def focus_game_window() -> bool:
 
 
 class Episode:
-    """One run from the race start. `act` returns an ACTION tuple, or None when done.
+    """One run from the race start (or, with `start_slot` > 0 and `start_step`, from a state
+    saved mid-run in that slot). `act` returns an ACTION tuple, or None when done.
 
     An episode whose inputs are known in advance may define `plan() -> [(steer, gas, bits)]`
     (index = race time / 10). With `run(..., batch=True)` the plugin then plays them itself
@@ -234,9 +235,7 @@ class GameSession:
             else:
                 start, self._held = self._held, None
                 ep = episodes[0]
-                link.rewind(0)
-                ep.begin(start)
-                a = ep.act(start)
+                a = self._begin(ep, start)
                 if batch and a is not None:
                     self._play(ep)
                 phase = 'run'
@@ -310,12 +309,20 @@ class GameSession:
                     link.action(0, 0, 0)
                     return results
                 ep = episodes[i]
-                link.rewind(0)
-                ep.begin(start)
-                a = ep.act(start)
+                a = self._begin(ep, start)
                 if batch and a is not None:
                     self._play(ep)
             link.action(*a)
+
+    def _begin(self, ep: Episode, start: P.Step):
+        """Rewind to the episode's start: slot 0 (the race start) or, for an episode with
+        `start_slot`/`start_step`, a state saved mid-run (branching)."""
+        slot = getattr(ep, 'start_slot', 0)
+        st = getattr(ep, 'start_step', None) if slot else None
+        self.link.rewind(slot if st is not None else 0)
+        s0 = st if st is not None else start
+        ep.begin(s0)
+        return ep.act(s0)
 
     def _finish_now(self, episodes, results, ep, start, keep, batch):
         """Continue a kept session whose first episode ended on the start STEP itself."""

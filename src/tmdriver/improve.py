@@ -86,6 +86,84 @@ class ImproveEpisode(Episode):
                 'decisions': self.decisions, 'ticks': self.ticks, 'stall_t': self.best_t, 'path': self.path}
 
 
+class PrefixEpisode(Episode):
+    """Replays a run's exact inputs up to `branch_t` (deterministic physics: the same states),
+    feeding the policy the same observations. At branch_t it saves the game state in `slot`
+    and the policy state, so BranchEpisodes can start there instead of at the race start."""
+
+    def __init__(self, link, policy: GhostPolicy, parent: dict, branch_t: int, slot: int = 1, log=print):
+        self.link, self.policy, self.parent, self.branch_t, self.slot, self.log = \
+            link, policy, parent, branch_t, slot, log
+        self.by_t = {t: (s, g, b) for t, s, g, b in parent['ticks']}
+
+    def begin(self, start):
+        self.policy.restart()
+        self.step, self.snap, self.diverged_m = None, None, None
+
+    def act(self, st):
+        t = st.race_time
+        if st.finished or t > self.branch_t:
+            return None
+        self.policy.observe(st)
+        if t == self.branch_t:
+            k = t // 100
+            if k < len(self.parent['path']):
+                self.diverged_m = float(np.linalg.norm(st.pos - np.asarray(self.parent['path'][k])))
+                if self.diverged_m > 0.01:
+                    self.log(f'  WARNING: replaying the best run diverged by {self.diverged_m:.3f} m at '
+                             f'{t / 1000:.1f}s (the physics should be deterministic)')
+            self.link.save(self.slot)        # answered together with the next episode's REWIND
+            self.step, self.snap = st, self.policy.snapshot()
+            return None
+        return self.by_t.get(t, (0, 0, 0))
+
+    def result(self):
+        return {'prefix': True, 'branch_t': self.branch_t, 'diverged_m': self.diverged_m}
+
+
+class BranchEpisode(ImproveEpisode):
+    """An ImproveEpisode that starts where PrefixEpisode saved the game (mid-run), with the
+    parent run's history before that point. Falls back to the race start if nothing was saved."""
+
+    def __init__(self, policy: GhostPolicy, limit_ms: int, temp: float, seed: int, prefix: PrefixEpisode):
+        super().__init__(policy, limit_ms, temp, seed)
+        self.prefix = prefix
+
+    @property
+    def start_slot(self):
+        return self.prefix.slot if self.prefix.step is not None else 0
+
+    @property
+    def start_step(self):
+        return self.prefix.step
+
+    def begin(self, start):
+        super().begin(start)
+        pre = self.prefix
+        if pre.step is None:
+            return
+        bt, parent = pre.branch_t, pre.parent
+        self.policy.restore(pre.snap)
+        self.ticks = [x for x in parent['ticks'] if x[0] < bt]
+        self.decisions = [d for d in parent['decisions'] if d[4] < bt]
+        self.path = list(parent['path'][:bt // 100])
+        self.best, self.best_t = self.policy.progress_m, bt
+
+    def result(self):
+        return dict(super().result(), branch_t=self.prefix.branch_t if self.prefix.step is not None else None)
+
+
+def branch_point(best: dict, rng) -> Optional[int]:
+    """Where to branch from the best run: 1-4 s before it got stuck, or, once it finishes,
+    anywhere along the run (to find time). On the 100 ms lattice; None if too early."""
+    if best['finished']:
+        t = rng.uniform(0.05, 0.95) * best['time_ms']
+    else:
+        t = best['stall_t'] - rng.uniform(1000, 4000)
+    t = int(t // 100 * 100)
+    return t if t >= 500 else None
+
+
 def path_points(path, spacing: float = 4.0, lift: float = 0.6):
     """Car positions -> points every `spacing` m (for the trigger-box drawing)."""
     out, last = [], None
@@ -166,27 +244,39 @@ def tmi_script(ticks) -> str:
 
 
 class Playback(Episode):
-    """Plays a recorded tick sequence back (to show the best run)."""
+    """Plays a recorded tick sequence back (to show the best run), recording like an
+    ImproveEpisode so the result can be compared with the plan."""
 
     def __init__(self, ticks):
         self.by_t = {t: (s, g, b) for t, s, g, b in ticks}
         self.end = ticks[-1][0] if ticks else 0
 
     def begin(self, start):
-        self.done = False
+        self.finish, self.ticks, self.path = None, [], []
 
     def act(self, st):
-        if st.finished or st.race_time > self.end + 1000:
+        if st.finished:
+            self.finish = st.race_time
             return None
-        return self.by_t.get(st.race_time, (0, 0, 0))
+        if st.race_time > self.end + 1000:
+            return None
+        a = self.by_t.get(st.race_time, (0, 0, 0))
+        if st.race_time >= 0:
+            self.ticks.append((st.race_time, *a))
+            if st.race_time % 100 == 0:
+                self.path.append(st.pos.astype(float).tolist())
+        return a
 
     def result(self):
-        return {}
+        return {'finished': self.finish is not None, 'time_ms': self.finish, 'ticks': self.ticks, 'path': self.path}
 
 
 def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: int = 6, elite_k: int = 3,
             steps: int = 12, bs: int = 64, lr: float = 1e-4, temps=(0.4, 0.7, 1.0), show: bool = True,
-            ckpt: Path = None, log=print):
+            ckpt: Path = None, branch: int = 8, log=print):
+    """branch > 0: from round 2 on, `branch` of the runs start from a state saved shortly before
+    the best run got stuck (or anywhere along it once it finishes), so the attempts are spent on
+    the hard part instead of re-driving the start every time."""
     from .evaluate import map_list
     from .policy import reference_positions
     ckpt = Path(ckpt or DRIVER_CKPT)
@@ -222,15 +312,25 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
     best: Optional[dict] = None
     history = []
     seed = 0
+    brng = np.random.default_rng(12345)
     for rnd in range(rounds):
         t0 = time.perf_counter()
         eps = [ImproveEpisode(policy, limit, 0.0, seed)]
-        for k in range(episodes):
+        bt = branch_point(best, brng) if branch and best is not None else None
+        n_start = episodes if bt is None else max(1, episodes // 3)
+        for k in range(n_start):
             seed += 1
             eps.append(ImproveEpisode(policy, limit, temps[k % len(temps)], seed))
+        if bt is not None:
+            pre = PrefixEpisode(link, policy, best, bt, log=log)
+            eps.append(pre)
+            for k in range(branch):
+                seed += 1
+                eps.append(BranchEpisode(policy, limit, temps[k % len(temps)], seed, pre))
         sess.status(f'Training {name}: round {rnd + 1}/{rounds}' +
                     (f", best {best['time_ms'] / 1000:.2f}s" if best and best['finished'] else ''))
         res = sess.run(eps, sim_only=True, keep=True)      # the game stays frozen until release()
+        res = [r for r in res if not r.get('prefix')]
         elite = sorted(elite + res, key=score, reverse=True)[:elite_k]
         improved = best is None or score(elite[0]) > score(best)
         best = elite[0]
@@ -242,7 +342,10 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
                'finished': f'{len(fin)}/{len(res)}', 'fastest_this_round': min(fin) if fin else None,
                'best_ms': best['time_ms'], 'best_progress_m': best['progress_m'], 'loss': loss,
                'seconds': round(time.perf_counter() - t0, 1),
-               'reasons': [r['reason'] for r in res], 'start_speed_kmh': res[0].get('start_kmh')}
+               'reasons': [r['reason'] for r in res], 'start_speed_kmh': res[0].get('start_kmh'),
+               'branch_from_s': bt / 1000 if bt is not None else None,
+               'branch_best': max((r['progress_m'] if not r['finished'] else float('inf')
+                                   for r in res if r.get('branch_t') is not None), default=None)}
         history.append(rec)
         if max(r['progress_m'] for r in res) < 5:
             log('  WARNING: the car did not move in any run. Is a screen blocking the race start '
@@ -251,8 +354,9 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
             f.write(json.dumps(dict(rec, time=time.strftime('%H:%M:%S'))) + '\n')
         best_txt = f"{best['time_ms'] / 1000:.2f}s" if best['finished'] else f"{best['progress_m']:.0f} m"
         stops = ', '.join(f'{n}x {k}' for k, n in Counter(rec['reasons']).most_common())
+        br = f"; {branch} runs from {bt / 1000:.1f}s" if bt is not None else ''
         log(f"round {rnd + 1}: greedy {rec['greedy']}, {rec['finished']} finished, best {best_txt}"
-            f"{' (new)' if improved else ''}, {rec['seconds']}s  [{stops}; greedy at 1 s: {rec['start_speed_kmh']} km/h]")
+            f"{' (new)' if improved else ''}, {rec['seconds']}s  [{stops}{br}]")
         if improved:
             with sess.hold():
                 draw(link, best['path'])          # the best line so far, visible in the game
@@ -306,10 +410,12 @@ def show_best(link, track_id: Optional[int] = None, speed: float = 1.0, log=prin
     sess.status(f'Best run shown ({txt}).')
 
 
-def drive_preview(link, track_id: Optional[int] = None, speed: float = 1.0, ckpt: Path = None, log=print):
-    """"Route first, then drive": the model drives the map once without rendering, its path
-    is drawn as small trigger boxes, then it drives visibly. The physics is deterministic and
-    the greedy policy too, so the visible run follows the drawn line exactly."""
+def drive_preview(link, track_id: Optional[int] = None, speed: float = 1.0, ckpt: Path = None,
+                  plans: int = 12, temps=(0.4, 0.7, 1.0), log=print):
+    """"Route first, then drive": the model drives the map `plans` times without rendering (one
+    greedy run, the rest sampled: keyboard steering is tapping, and always taking the most likely
+    steering bin understeers), the best plan is drawn as small trigger boxes, then its exact
+    inputs are played back visibly. The physics is deterministic, so the visible run is the plan."""
     from .evaluate import map_list
     from .policy import reference_positions, track_id_for
     ckpt = Path(ckpt or DRIVER_CKPT)
@@ -332,16 +438,24 @@ def drive_preview(link, track_id: Optional[int] = None, speed: float = 1.0, ckpt
     ref = reference_positions(uid, track_id or track_id_for(uid))
     policy.reset([b.__dict__ for b in sess.map.blocks], ref[0] if ref else None)
     draw(link, [])
-    sess.status('AI is planning its line ...')
-    plan = sess.run([ImproveEpisode(policy, 180000, 0.0, 0)], sim_only=True)[0]
+    sess.status(f'AI is planning its line ({plans} tries) ...')
+    eps = [ImproveEpisode(policy, 180000, 0.0, 0)] + \
+        [ImproveEpisode(policy, 180000, temps[k % len(temps)], k + 1) for k in range(plans - 1)]
+    res = sess.run(eps, sim_only=True)
+    plan = max(res, key=score)
+    fmt = lambda r: f"{r['time_ms'] / 1000:.2f}s" if r['finished'] else f"{r['progress_m']:.0f} m"
+    log(f"plans: greedy {fmt(res[0])}, {sum(r['finished'] for r in res)}/{len(res)} finished, "
+        f"best {fmt(plan)} (temperature {plan['temp']})")
     txt = f"{plan['time_ms'] / 1000:.2f}s" if plan['finished'] else f"{plan['reason']} after {plan['progress_m']:.0f} m"
     log(f'plan: {txt}, {len(plan["path"])} path samples')
     draw(link, plan['path'])
-    sess.status(f'Planned line ({txt}) drawn, the AI drives it now')
+    sess.status(f'Best of {plans} plans ({txt}) drawn, the AI drives it now')
     link.speed(speed)
-    real = sess.run([ImproveEpisode(policy, 180000, 0.0, 0)], sim_only=False)[0]
-    same = plan['ticks'] == real['ticks']
-    rtxt = f"{real['time_ms'] / 1000:.2f}s" if real['finished'] else f"{real['reason']} after {real['progress_m']:.0f} m"
+    real = sess.run([Playback(plan['ticks'])], sim_only=False)[0]
+    n = min(len(plan['path']), len(real['path']))
+    same = real['finished'] == plan['finished'] and real['time_ms'] == plan['time_ms'] and n > 0 and \
+        max(float(np.linalg.norm(np.subtract(plan['path'][i], real['path'][i]))) for i in range(n)) < 1e-3
+    rtxt = f"{real['time_ms'] / 1000:.2f}s" if real['finished'] else f"ended after {len(real['ticks']) / 100:.1f}s"
     log(f'drive: {rtxt}; identical to the plan: {same}')
     sess.status(f'AI: {rtxt} (plan {txt}, {"identical" if same else "DIFFERENT"})')
     return plan, real

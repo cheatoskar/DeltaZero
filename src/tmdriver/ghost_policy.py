@@ -70,6 +70,18 @@ class GhostPolicy:
         else:
             self.line = G.Line(np.asarray(line))
 
+    STATE = ('pos', 'psi', 'psi0', 's', 'odo', 'last_p', 'action', 'last_out', 'last_decision_t')
+
+    def snapshot(self) -> dict:
+        """The per-run state (history, line position, odometer): restore() continues a run
+        from here, e.g. from a game state saved mid-run."""
+        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in
+                ((k, getattr(self, k)) for k in self.STATE)}
+
+    def restore(self, snap: dict):
+        for k, v in snap.items():
+            setattr(self, k, dict(v) if isinstance(v, dict) else v)
+
     def restart(self):
         self.pos = {}
         self.psi = {}
