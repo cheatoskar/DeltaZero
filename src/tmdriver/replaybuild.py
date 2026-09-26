@@ -26,6 +26,7 @@ from .paths import DATA, TMX, safe
 from .tracebuild import GHOST, MAX_JUMP_M, MAX_RUN_S, MIN_RUN_S, VOCAB, PartWriter
 
 REPLAY_SHARDS = GHOST / 'replay_shards'
+RESIM_SHARDS = GHOST / 'resim_shards'       # from the client-free re-simulation (sim-night)
 MAPS_PER_PART = 250
 
 
@@ -47,6 +48,45 @@ def map_sources():
                 seen.add(m['track_id'])
                 out.append((m['track_id'], tracks_dir() / m['map_file'], TMX / safe(m['uid'])))
     return sorted(out)
+
+
+def resim_sources():
+    """[(track_id, map path, replay folder, exact replay ids)] from sim-night (data/resim_c):
+    only replays whose inputs reproduced the ghost exactly in TMNF-C, so every label is known to
+    produce the recorded line."""
+    from .tmnfc import RESIM_C
+    idx = RESIM_C / 'index.jsonl'
+    if not idx.exists():
+        return []
+    exact, uid = {}, {}
+    for line in idx.read_text(encoding='utf-8').splitlines():
+        r = json.loads(line)
+        if r.get('exact'):
+            exact.setdefault(int(r['track_id']), set()).add(str(r['replay']))
+            uid[int(r['track_id'])] = r['uid']
+    maps = {}
+    for f in (DATA / 'maps').glob('*_*.Challenge.Gbx'):
+        try:
+            maps[int(f.name.split('.')[0].rsplit('_', 1)[1])] = f
+        except ValueError:
+            pass
+    return sorted((tid, maps[tid], TMX / safe(uid[tid]), ids) for tid, ids in exact.items() if tid in maps)
+
+
+def load_vocab() -> dict:
+    """The stage-A vocabulary; without data/ghost/vocab.json it comes from the driver checkpoint
+    (the model can only use block ids it was trained with)."""
+    if VOCAB.exists():
+        return json.loads(VOCAB.read_text(encoding='utf-8'))
+    import torch
+    from .paths import DRIVER_CKPT
+    ck = DRIVER_CKPT
+    if not Path(ck).exists():
+        raise RuntimeError(f'{VOCAB} missing and no driver checkpoint to take the vocabulary from')
+    vocab = torch.load(ck, map_location='cpu', weights_only=False)['meta']['vocab']
+    VOCAB.parent.mkdir(parents=True, exist_ok=True)
+    VOCAB.write_text(json.dumps(vocab), encoding='utf-8')
+    return vocab
 
 
 def map_blocks(path: Path):
@@ -100,7 +140,9 @@ def build_part(sources, vocab, out_dir: Path, seed: int, log=print) -> dict:
     w = PartWriter(stride=1, rng=rng)
     stats = {'replays': 0, 'uid_mismatch': 0, 'respawns': 0, 'bad_time': 0, 'length': 0, 'jump': 0,
              'parse_error': 0, 'no_map': 0, 'runs': 0}
-    for tid, mpath, rdir in sources:
+    for src in sources:
+        tid, mpath, rdir = src[:3]
+        allowed = src[3] if len(src) > 3 else None       # resim_c: only the exact replays
         if not mpath.exists() or not rdir.exists():
             stats['no_map'] += 1
             continue
@@ -111,6 +153,8 @@ def build_part(sources, vocab, out_dir: Path, seed: int, log=print) -> dict:
             continue
         runs = []
         for f in sorted(rdir.glob('*.Replay.Gbx')):
+            if allowed is not None and f.name.split('.')[0] not in allowed:
+                continue
             stats['replays'] += 1
             try:
                 rep = replay_mod.load(f)
@@ -148,22 +192,25 @@ def _job(args):
     sources, out, seed = args
     if (out / 'DONE').exists():
         return json.loads((out / 'stats.json').read_text(encoding='utf-8'))
-    vocab = json.loads(VOCAB.read_text(encoding='utf-8'))
-    return build_part(sources, vocab, out, seed)
+    return build_part(sources, load_vocab(), out, seed)
 
 
-def build_all(workers: int = 4, rebuild: bool = False, log=print):
-    if not VOCAB.exists():
-        raise RuntimeError(f'{VOCAB} missing: build the trace shards first (the vocabulary must match stage A)')
-    src = map_sources()
+def build_all(workers: int = 4, rebuild: bool = False, source: str = 'bulk', log=print):
+    """source 'bulk' (the bulk download + M1 manifest) -> replay_shards, 'resim_c' (the exact
+    runs of sim-night) -> resim_shards."""
+    load_vocab()
+    if source == 'resim_c':
+        src, root = resim_sources(), RESIM_SHARDS
+    else:
+        src, root = map_sources(), REPLAY_SHARDS
     jobs = []
     for k in range(0, len(src), MAPS_PER_PART):
-        out = REPLAY_SHARDS / f'part{k // MAPS_PER_PART:04d}'
+        out = root / f'part{k // MAPS_PER_PART:04d}'
         if rebuild and out.exists():
             import shutil
             shutil.rmtree(out)
         jobs.append((src[k:k + MAPS_PER_PART], out, 1000 + k))
-    log(f'{len(src)} maps in {len(jobs)} parts, {workers} workers -> {REPLAY_SHARDS}')
+    log(f'{len(src)} maps in {len(jobs)} parts, {workers} workers -> {root}')
     if workers <= 1:
         return [_job(j) for j in jobs]
     import multiprocessing as mp

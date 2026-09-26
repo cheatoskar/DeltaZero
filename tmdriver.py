@@ -228,7 +228,7 @@ def drive(args):
 
 def ghost_replays(args):
     from tmdriver.replaybuild import build_all
-    build_all(workers=args.workers, rebuild=args.rebuild)
+    build_all(workers=args.workers, rebuild=args.rebuild, source=args.source)
 
 
 GAME_COMMANDS = {'resim', 'improve', 'drive', 'show', 'eval', 'launch', 'rl', 'check-hold', 'night'}
@@ -411,6 +411,7 @@ def main():
     gr = sub.add_parser('ghost-replays', help='stage A2: TMX replays -> shards with orientation (no game needed)')
     gr.add_argument('--workers', type=int, default=4)
     gr.add_argument('--rebuild', action='store_true')
+    gr.add_argument('--source', default='bulk', help="bulk (replay_shards) | resim_c (sim-night's exact runs -> resim_shards)")
     gr.set_defaults(fn=ghost_replays)
     args = ap.parse_args()
     os.environ['TMDRIVER_DEVICE'] = args.device
