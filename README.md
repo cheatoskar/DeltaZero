@@ -17,10 +17,11 @@ faster on a map by practising it, through a TMInterface plugin.
   physics state, as training data for later stages. A batch mode lets the plugin play the
   inputs itself, the way TMInterface's bruteforce does.
 
-> Status (2026-09-25): research prototype. The best pretrained model (`ghost_big2`) picks
-> the exact steering class in 78.6 % of held-out samples and the right steering direction
-> in 81 %. First in-game runs finish maps. See [docs/STAGES.md](docs/STAGES.md) for the
-> roadmap and [docs/CONCEPT.md](docs/CONCEPT.md) for the original concept.
+> Status (2026-09-26): research prototype. The best pretrained model (`ghost_big2`, 14.7 M
+> parameters) picks the exact steering class in 78.6 % of held-out samples and the right
+> steering direction in 81 %. In-game runs finish short race maps; RL with PPO over several
+> game instances is being tested. Imitation has plateaued, so the next gains come from RL,
+> physics inputs from re-simulated replays, and route planning from the map itself.
 
 The Python package is still called `tmdriver` and the plugin `TMDriver` (the project's
 working name).
@@ -78,22 +79,39 @@ Then:
 
    Each job opens its own console with live progress.
 
-Step-by-step guide: [docs/HOME_PC.md](docs/HOME_PC.md).
+Without the game window, double-click a launcher instead (then `Start_DeltaZero.bat` must
+not run at the same time): `Drive.bat`, `Train.bat`, `Train_RL.bat`, `Resimulate.bat`,
+`Resimulate_TestMaps.bat`, `Check_Hold.bat`. Every job can be stopped with Ctrl+C; Train and
+RL then save and show the best run.
+
+Setup on Windows with an Nvidia GPU: Python 3.12, `pip install torch --index-url
+https://download.pytorch.org/whl/cu126` (cu126 still supports Pascal cards such as the
+GTX 1080 Ti), `pip install numpy pandas pyarrow`, then `python tmdriver.py install-plugin`.
+Keep TMInterface up to date in TMLoader (an old version queued maps without loading them).
+Further game instances ("helpers") take the next free plugin ports and share the work of
+re-simulation, Train and RL.
 
 ## Command line
 
 ```
-python tmdriver.py [--device auto|cuda|cpu] <command>
+python tmdriver.py [--device auto|cuda|cpu] [--hold N] <command>
   serve            connect to the plugin; handles the in-game buttons and tool jobs
   drive            plan in simulation-only, draw the line, then drive it visibly
-  improve          RL v1 on one map (--map ID --rounds N)
-  resim            re-simulate TMX replays in the game (--source bulk --hours H [--per-tick])
+  improve          RL v1 on one map (--map ID --rounds N [--line])
+  rl               RL v2 (PPO) on one map (--map ID --iterations N [--line])
+  resim            re-simulate TMX replays in the game (--maps IDS | --pool | --source bulk)
+  tmx-pool         map pool from the TMX search (most awarded maps in a time range)
+  launch           start helper game instances
+  check-hold       check that --hold gives identical runs in the real game
   eval             closed-loop evaluation on held-out maps
   bulk-fetch       download awarded TMX maps + replays (rate-limited, resumable)
   ghost-build      stage A: HF traces + TMX blocks -> training shards
   ghost-replays    stage A2: TMX replays -> shards with orientation
   pretrain         train DriverNet2 (GPU)
 ```
+
+Without a reference line (the default) the model sees only the track blocks and its own
+motion; the fastest TMX replay, if there is one, only judges progress during training.
 
 ## Tests
 
@@ -104,18 +122,21 @@ protocol, so they need no TrackMania install:
 python tests/test_ghost.py          # live features == training features
 python tests/test_m1_fake.py        # re-simulation (batch == per-tick), dataset, training, eval
 python tests/test_ghost_fake.py     # stage A pipeline end to end
-python tests/test_improve_fake.py   # RL loop, drawing, plan == visible run
+python tests/test_improve_fake.py   # RL v1, two instances, Ctrl+C, drawing, plan == visible run
+python tests/test_rl.py             # RL v2 maths (GAE, action distribution, PPO direction)
+python tests/test_rl_fake.py        # RL v2 on two instances, action hold == per-tick
+python tests/test_course.py         # progress without a line, stall rules, respawn skip
 python tests/test_jobs_fake.py      # in-game tool buttons -> job consoles
 ```
 
 ## Repository layout
 
 ```
-plugin/TMDriver/   TMInterface plugin (protocol 7)
-src/tmdriver/      Python package: link/protocol, session, features (ghost*.py), models,
-                   pretraining, RL (improve.py), re-simulation, TMX download, .Gbx reader
-scripts/           GPU-box helpers (push/pull, Vast run, Wine start)
-docs/              plan, data notes, guides
+plugin/TMDriver/   TMInterface plugin (protocol 12)
+src/tmdriver/      Python package: link/protocol, session, fleet (several instances), features
+                   (ghost*.py), models, pretraining, RL v1 (improve.py) and v2 (rl.py),
+                   re-simulation, TMX download, .Gbx reader
+scripts/           GPU-box helpers (push/pull, Vast run, Wine start), course_check.py
 tests/             fake game + end-to-end tests
 ```
 

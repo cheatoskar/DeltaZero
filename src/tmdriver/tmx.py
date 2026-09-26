@@ -6,7 +6,7 @@ Verified endpoints (2026-09-24, no auth needed):
     /trackgbx/{TrackId}                map file
     /recordgbx/{ReplayId}              replay file
 Requests are serialised with a minimum gap, and identify the project in the User-Agent.
-Bulk downloading (all 3.5M replays) is a separate decision; see docs/DATA.md.
+Bulk downloading (all 3.5M replays) is a separate decision, coordinated with TMX.
 """
 import json
 import os

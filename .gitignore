@@ -9,3 +9,7 @@ src/tmdriver/gbx/lib/*.dll
 *.log
 .vscode/
 .idea/
+
+# local working notes (not published)
+docs/
+CLAUDE.md

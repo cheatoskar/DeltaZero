@@ -1,4 +1,4 @@
-"""RL v2, milestone RL-1: PPO on one map (design: docs/RL_V2.md).
+"""RL v2, milestone RL-1: PPO on one map.
 
     python tmdriver.py rl --map 414041 --iterations 30        (serve must NOT run)
 

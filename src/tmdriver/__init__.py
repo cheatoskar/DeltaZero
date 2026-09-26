@@ -1,1 +1,1 @@
-"""TMDriverAI: an AI that drives TrackMania Nations Forever maps (see docs/PLAN.md)."""
+"""DeltaZero (package tmdriver): an AI that drives TrackMania Nations Forever maps."""
