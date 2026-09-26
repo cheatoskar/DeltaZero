@@ -397,7 +397,7 @@ def main():
     sn.add_argument('--within', type=float, default=1.05, help='only replays within this factor of the best time')
     sn.add_argument('--nadeo-replays', type=int, default=100, help="fastest replays on Nadeo's own maps")
     sn.add_argument('--workers', type=int, default=0, help='simulation processes (default: CPU cores - 1)')
-    sn.add_argument('--tmx-gap', type=float, default=0.15, help='seconds between TMX requests')
+    sn.add_argument('--tmx-gap', type=float, default=0.1, help='seconds between TMX requests')
     sn.set_defaults(fn=sim_night)
     tp = sub.add_parser('tmx-pool', help='map pool from the TMX search: most awarded maps in a time range')
     tp.add_argument('--maps', type=int, default=2000)

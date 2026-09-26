@@ -23,6 +23,7 @@ clone (default: ~/Downloads/TMNF-C).
 import hashlib
 import json
 import os
+import queue
 import struct
 import subprocess
 import sys
@@ -125,20 +126,43 @@ class MapSim:
     """One tmnfc_batch process for one map: the track is loaded once, each run gets a fresh
     world. Not thread safe; use one per worker."""
 
+    START_TIMEOUT_S = 60.0
+    RUN_TIMEOUT_S = 120.0
+
     def __init__(self, prep: Dict):
         spawn = ','.join(repr(float(v)) for v in prep['spawn'])
         self.tmp = tempfile.TemporaryDirectory(prefix='tmnfc_')
         self.p = subprocess.Popen([str(BATCH_EXE), str(prep['track']), str(prep['vehicle']), prep['sha'], spawn],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   text=True, bufsize=1)
-        # drain stderr so the process never blocks on it
+        # drain stderr so the process never blocks on it; stdout lines go through a queue so
+        # every wait has a timeout (a crashed or hung simulator must not stop the night)
         self._err: List[str] = []
+        self._out: 'queue.Queue[str]' = queue.Queue()
         threading.Thread(target=lambda: self._err.extend(self.p.stderr), daemon=True).start()
-        line = self.p.stdout.readline().strip()
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+        line = self._line(self.START_TIMEOUT_S)
         if line != 'ready':
-            self.p.wait(timeout=10)
+            self.kill()
             raise RuntimeError(f"tmnfc_batch did not start: {line or ''.join(self._err)[-300:]}")
         self.n = 0
+
+    def _read_stdout(self):
+        for line in self.p.stdout:
+            self._out.put(line.strip())
+        self._out.put('')                          # EOF: the process ended
+
+    def _line(self, timeout: float) -> str:
+        try:
+            return self._out.get(timeout=timeout)
+        except queue.Empty:
+            return f'timeout after {timeout:.0f} s'
+
+    def kill(self):
+        try:
+            self.p.kill()
+        except OSError:
+            pass
 
     def run(self, actions) -> np.ndarray:
         self.n += 1
@@ -147,8 +171,9 @@ class MapSim:
         inp.write_bytes(schedule(actions))
         self.p.stdin.write(f'{inp}\t{out}\n')
         self.p.stdin.flush()
-        ans = self.p.stdout.readline().strip()
+        ans = self._line(self.RUN_TIMEOUT_S)
         if not ans.startswith('ok'):
+            self.kill()
             raise RuntimeError(f"tmnfc_batch: {ans or ''.join(self._err)[-300:]}")
         rec = np.frombuffer(out.read_bytes(), dtype=OUT_REC).copy()
         inp.unlink()
@@ -160,8 +185,11 @@ class MapSim:
             self.p.stdin.close()
             self.p.wait(timeout=10)
         except Exception:
-            self.p.kill()
-        self.tmp.cleanup()
+            self.kill()
+        try:
+            self.tmp.cleanup()
+        except OSError:
+            pass
 
     def __enter__(self):
         return self

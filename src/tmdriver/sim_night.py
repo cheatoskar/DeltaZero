@@ -29,7 +29,8 @@ POOL_FILE = DATA / 'tmx_award_pool.jsonl'
 POOL_STATE = DATA / 'tmx_award_pool.json'
 MAP_DIR = DATA / 'maps'
 PAGE = 1000
-FIELDS = ('TrackId,TrackName,Authors[],Tags[],AuthorTime,Routes,Difficulty,Environment,Car,'
+FETCHERS = 4                       # parallel download threads (one request rate for all)
+FIELDS = ('TrackId,TrackName,UId,Authors[],Tags[],AuthorTime,Routes,Difficulty,Environment,Car,'
           'PrimaryType,Mood,Awards,Comments,UploadedAt,WRReplay.ReplayTime,ReplayType')
 
 
@@ -124,10 +125,13 @@ class SimNight:
         return time.monotonic() < self.t_end
 
     def done_maps(self) -> set:
-        f = self.root / 'maps.jsonl'
-        if not f.exists():
-            return set()
-        return {json.loads(l)['track_id'] for l in f.read_text(encoding='utf-8').splitlines() if l.strip()}
+        """Maps finished or failed on an earlier night (both are skipped)."""
+        out = set()
+        for name in ('maps.jsonl', 'errors.jsonl'):
+            f = self.root / name
+            if f.exists():
+                out |= {json.loads(l)['track_id'] for l in f.read_text(encoding='utf-8').splitlines() if l.strip()}
+        return out
 
     def error(self, tid, name, msg):
         with self.lock:
@@ -139,12 +143,26 @@ class SimNight:
         self.log(f'  ERROR {tid} {name!r}: {msg}'[:240])
 
     def fetcher(self, shift: int, sign: int):
-        from . import tmx
-        try:
-            done = self.done_maps()
-            for m in award_pool(self.min_awards, self.log):
-                if not self.time_left():
-                    break
+        """FETCHERS threads share the pool iterator; tmx.get keeps them under the request rate
+        (TMX answers take ~0.3-0.5 s each, so one thread alone cannot reach it)."""
+        done = self.done_maps()
+        pool = award_pool(self.min_awards, self.log)
+        pool_lock = threading.Lock()
+
+        def next_map():
+            with pool_lock:
+                return next(pool, None)
+
+        def fetch_loop():
+            from . import tmx
+            while self.time_left():
+                try:
+                    m = next_map()
+                except Exception as e:           # noqa: BLE001
+                    self.error(0, 'pool', repr(e))
+                    return
+                if m is None:
+                    return
                 tid = int(m['TrackId'])
                 if tid in done:
                     continue
@@ -154,20 +172,25 @@ class SimNight:
                     if not reps:
                         self.error(tid, m.get('TrackName', ''), 'no replays on TMX')
                         continue
-                    res = tmx.fetch(tid, len(reps), TMX, safe, log=lambda *a: None, reps=reps, map_dir=MAP_DIR)
+                    info = ({'TrackId': tid, 'TrackName': m.get('TrackName', ''), 'UId': m['UId']}
+                            if m.get('UId') else None)
+                    res = tmx.fetch(tid, len(reps), TMX, safe, log=lambda *a: None, reps=reps, map_dir=MAP_DIR,
+                                    info=info)
                 except Exception as e:           # noqa: BLE001  (removed from TMX, network)
                     self.error(tid, m.get('TrackName', ''), f'fetch: {e!r}')
                     continue
-                keep = res['map']
                 with self.lock:
                     self.stats['maps_fetched'] += 1
                 self.q.put({'track_id': tid, 'name': m.get('TrackName', ''), 'awards': m.get('Awards'),
-                            'uid': res['uid'], 'map': str(keep), 'replays': [str(p) for p in res['replays']],
+                            'uid': res['uid'], 'map': str(res['map']), 'replays': [str(p) for p in res['replays']],
                             'nadeo': is_nadeo(m), 'tags': m.get('Tags'), 'shift': shift, 'sign': sign})
-        except Exception as e:                       # noqa: BLE001
-            self.error(0, 'pool', repr(e))
-        finally:
-            self.fetch_done.set()
+
+        threads = [threading.Thread(target=fetch_loop, daemon=True) for _ in range(FETCHERS)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.fetch_done.set()
 
     def jobs(self) -> Iterator[dict]:
         while True:

@@ -135,9 +135,10 @@ def tracks_dir() -> Path:
 
 
 def fetch(track_id: int, n_replays: int, tmx_root: Path, safe_uid, log=print, reps=None,
-          map_dir: Path = None) -> Dict:
-    """map_dir: where the map goes (default: the game's TMDriver folder, so the game can load it)."""
-    info = track_info(track_id)
+          map_dir: Path = None, info: Dict = None) -> Dict:
+    """map_dir: where the map goes (default: the game's TMDriver folder, so the game can load it).
+    info: the map's TrackId/TrackName/UId when known already (saves one request)."""
+    info = info or track_info(track_id)
     uid = info['UId']
     name = info['TrackName'].replace('.Challenge', '')
     mdir = map_dir or tracks_dir()
