@@ -44,6 +44,11 @@ BASE_TRACK_SHA = 'f081a82f2e9ea5d37a54e8f3b5f50962bad8a5a54e59ceff98dabe52ebaa1e
 PACKS = os.environ.get('TMDRIVER_PACKS', 'C:/Program Files (x86)/TmNationsForever/Packs')
 CACHE = DATA / 'tmnfc'                  # built tracks and re-bound vehicles, per map
 RESIM_C = DATA / 'resim_c'              # results: <track_id>/<replay>.npz + index.jsonl
+# Build maps the exact builder rejects too (our TMNF-C patch, see tmnfc_port/): every run is
+# still checked against its ghost, so a wrong track only costs that map. Measured 2026-09-26:
+# 85 of 132 rejected maps build, 381 of 949 of their replays exact.
+os.environ.setdefault('TMNF_LENIENT', '1')
+LENIENT_TAG = 'lenient'
 EXACT_TOL_M = 1e-3
 STATE_EVERY_MS = 50                     # saved state resolution (actions stay per tick)
 TICK = 10
@@ -110,7 +115,7 @@ def prepare_map(challenge: Path, key: str) -> Dict:
                             '--packs', PACKS], capture_output=True, text=True)
         if r.returncode != 0:
             msg = (r.stderr or r.stdout).strip().splitlines()
-            raise RuntimeError('track build failed: ' + (msg[-1] if msg else '?'))
+            raise RuntimeError(f'track build failed ({LENIENT_TAG}): ' + (msg[-1] if msg else '?'))
     vehicle = d / f'{sha[:16]}.tmnfvehicle'
     if not vehicle.exists():
         blob = BASE_VEHICLE.read_bytes()

@@ -129,8 +129,16 @@ class SimNight:
         out = set()
         for name in ('maps.jsonl', 'errors.jsonl'):
             f = self.root / name
-            if f.exists():
-                out |= {json.loads(l)['track_id'] for l in f.read_text(encoding='utf-8').splitlines() if l.strip()}
+            if not f.exists():
+                continue
+            for line in f.read_text(encoding='utf-8').splitlines():
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                # maps the exact track builder rejected get one more try with the lenient one
+                if "track build failed:" in r.get('error', ''):
+                    continue
+                out.add(r['track_id'])
         return out
 
     def error(self, tid, name, msg):

@@ -1,0 +1,393 @@
+diff --git a/oracle/determinism_test.py b/oracle/determinism_test.py
+index d68a467..2d6ce70 100755
+--- a/oracle/determinism_test.py
++++ b/oracle/determinism_test.py
+@@ -22,6 +22,9 @@ DEFAULT_MAP = "A01-Race"
+ 
+ 
+ def map_command(track_name: str) -> str:
++    # Windows lane: "TMDriver/<stem>" loads Tracks\Challenges\TMDriver\<stem>.Challenge.Gbx
++    if track_name.startswith("TMDriver/") and '"' not in track_name:
++        return 'map "TMDriver\\' + track_name.split("/", 1)[1] + '.Challenge.Gbx"'
+     if not track_name or any(character in track_name for character in '"\\/'):
+         raise ValueError("track name must be a plain Official Maps stem")
+     return f'map "Official Maps/{track_name}.Challenge.Gbx"'
+diff --git a/oracle/dump_vehicle_snapshot.py b/oracle/dump_vehicle_snapshot.py
+index 94133d2..5ab52e3 100644
+--- a/oracle/dump_vehicle_snapshot.py
++++ b/oracle/dump_vehicle_snapshot.py
+@@ -37,11 +37,13 @@ from tminterface.structs import SimStateData
+ 
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+-PREFIX = game_layout(
++NATIVE = os.name == "nt"          # Windows lane: the game runs natively, no Wine prefix
++PREFIX = None if NATIVE else game_layout(
+     Path(os.environ.get("TMNF_WINEPREFIX", ROOT / "oracle" / "wineprefix"))
+ ).prefix
+ READER_SOURCE = ROOT / "oracle" / "vehicle_memory_reader.c"
+-READER_EXE = ROOT / "build" / PREFIX.name / "vehicle_memory_reader.exe"
++READER_EXE = (ROOT / "build" / "win32" / "vehicle_memory_reader.exe" if NATIVE
++              else ROOT / "build" / PREFIX.name / "vehicle_memory_reader.exe")
+ 
+ V3_MAGIC = b"TMNFM6G1"
+ V3_VERSION = 4
+@@ -415,6 +417,19 @@ class PhaseSnapshot:
+ 
+ class MemoryReader:
+     def __init__(self) -> None:
++        if NATIVE:                    # prebuilt with zig cc -target x86-windows-gnu
++            self.process = subprocess.Popen(
++                (str(READER_EXE),),
++                stdin=subprocess.PIPE,
++                stdout=subprocess.PIPE,
++                stderr=subprocess.PIPE,
++            )
++        else:
++            self._start_wine()
++        ready = self._readline()
++        require(ready.startswith("READY "), f"unexpected memory reader greeting: {ready}")
++
++    def _start_wine(self) -> None:
+         READER_EXE.parent.mkdir(parents=True, exist_ok=True)
+         subprocess.run(
+             (
+@@ -441,8 +456,6 @@ class MemoryReader:
+             stderr=subprocess.PIPE,
+             env=environment,
+         )
+-        ready = self._readline()
+-        require(ready.startswith("READY "), f"unexpected memory reader greeting: {ready}")
+ 
+     def _readline(self) -> str:
+         stdout = self.process.stdout
+diff --git a/oracle/tmi_client.py b/oracle/tmi_client.py
+index 1c8483c..e0c2b96 100644
+--- a/oracle/tmi_client.py
++++ b/oracle/tmi_client.py
+@@ -117,9 +117,12 @@ class TMInterface:
+         return self._read_int32() != 0
+ 
+     def _read_exact(self, size: int) -> bytes:
+-        data = self.socket.recv(size, socket.MSG_WAITALL)
+-        if len(data) != size:
+-            raise ConnectionError(f"socket closed after {len(data)} of {size} bytes")
++        data = b""
++        while len(data) < size:        # no MSG_WAITALL on Windows
++            chunk = self.socket.recv(size - len(data))
++            if not chunk:
++                raise ConnectionError(f"socket closed after {len(data)} of {size} bytes")
++            data += chunk
+         return data
+ 
+     def _read_int32(self) -> int:
+diff --git a/oracle/tracer/model6_capture.c b/oracle/tracer/model6_capture.c
+index be9b4e7..5ad8eb5 100644
+--- a/oracle/tracer/model6_capture.c
++++ b/oracle/tracer/model6_capture.c
+@@ -394,6 +394,8 @@ static uint8_t *serialize_graph(
+ 	return blob.data;
+ }
+ 
++DWORD tracer_config(const char *name, char *out, DWORD size);
++
+ void model6_capture_initialize(
+ 	HANDLE heap, uint32_t module_base, Model6CaptureFatalFn fatal_fn,
+ 	Model6CaptureFatalFn log_fn)
+@@ -404,7 +406,7 @@ void model6_capture_initialize(
+ 	g_module_base = module_base;
+ 	g_fatal = fatal_fn;
+ 	g_log = log_fn;
+-	if (GetEnvironmentVariableA(
++	if (tracer_config(
+ 		    "TMNF_TRACK_SHA256", track_sha256,
+ 		    sizeof(track_sha256)) != 64)
+ 		fail("TMNF_TRACK_SHA256 must contain 64 hexadecimal characters");
+diff --git a/oracle/tracer/tracer.c b/oracle/tracer/tracer.c
+index bcfd2ce..4b17391 100644
+--- a/oracle/tracer/tracer.c
++++ b/oracle/tracer/tracer.c
+@@ -1025,6 +1025,44 @@ static void probe_update_turbo(void)
+ 	HeapFree(g_heap, 0, car);
+ }
+ 
++static HMODULE g_self_module;
++
++/* GetEnvironmentVariableA, falling back to TMNFTracer.cfg (NAME=VALUE lines) next to this
++ * DLL, so the tracer can be injected into an already running game on Windows. */
++DWORD tracer_config(const char *name, char *out, DWORD size)
++{
++	char path[MAX_PATH], line[1024];
++	DWORD n = GetEnvironmentVariableA(name, out, size);
++	FILE *f;
++	char *slash;
++	size_t len = strlen(name);
++	if (n != 0 || g_self_module == NULL)
++		return n;
++	if (GetModuleFileNameA(g_self_module, path, sizeof(path)) == 0)
++		return 0;
++	slash = strrchr(path, '\\');
++	if (slash == NULL)
++		return 0;
++	strcpy(slash + 1, "TMNFTracer.cfg");
++	f = fopen(path, "r");
++	if (f == NULL)
++		return 0;
++	while (fgets(line, sizeof(line), f) != NULL) {
++		if (strncmp(line, name, len) == 0 && line[len] == '=') {
++			char *v = line + len + 1;
++			v[strcspn(v, "\r\n")] = '\0';
++			n = (DWORD)strlen(v);
++			if (n < size)
++				strcpy(out, v);
++			else
++				n = n + 1;
++			break;
++		}
++	}
++	fclose(f);
++	return n;
++}
++
+ static DWORD WINAPI initialize_tracer(void *unused)
+ {
+ 	char trace_directory[MAX_PATH];
+@@ -1041,15 +1079,15 @@ static DWORD WINAPI initialize_tracer(void *unused)
+ 	unsigned long record_start;
+ 	(void)unused;
+ 
+-	if (GetEnvironmentVariableA(
++	if (tracer_config(
+ 		    "TMNF_TRACE_DIR", trace_directory, sizeof(trace_directory)) == 0)
+ 		fatal("TMNF_TRACE_DIR is required");
+-	filter_length = GetEnvironmentVariableA(
++	filter_length = tracer_config(
+ 		"TMNF_TRACE_TARGETS", target_filter, sizeof(target_filter));
+ 	if (filter_length >= sizeof(target_filter))
+ 		fatal("TMNF_TRACE_TARGETS is too long");
+ 	g_filter_active = filter_length != 0;
+-	record_start_length = GetEnvironmentVariableA(
++	record_start_length = tracer_config(
+ 		"TMNF_TRACE_RECORD_START",
+ 		record_start_text, sizeof(record_start_text));
+ 	if (record_start_length != 0) {
+@@ -1124,6 +1162,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
+ 	(void)reserved;
+ 	if (reason == DLL_PROCESS_ATTACH) {
+ 		HANDLE thread;
++		g_self_module = instance;
+ 		DisableThreadLibraryCalls(instance);
+ 		thread = CreateThread(NULL, 0, initialize_tracer, NULL, 0, NULL);
+ 		if (thread == NULL)
+diff --git a/oracle/tracer/track_dump.c b/oracle/tracer/track_dump.c
+index 6402540..88afcfb 100644
+--- a/oracle/tracer/track_dump.c
++++ b/oracle/tracer/track_dump.c
+@@ -1036,6 +1036,44 @@ static void install_hook(void)
+ 	log_line("track dump hook installed");
+ }
+ 
++static HMODULE g_self_module;
++
++/* GetEnvironmentVariableA, falling back to TMNFTracer.cfg (NAME=VALUE lines) next to this
++ * DLL, so the dumper can be injected into an already running game on Windows. */
++static DWORD tracer_config(const char *name, char *out, DWORD size)
++{
++	char path[MAX_PATH], line[1024];
++	DWORD n = GetEnvironmentVariableA(name, out, size);
++	FILE *f;
++	char *slash;
++	size_t len = strlen(name);
++	if (n != 0 || g_self_module == NULL)
++		return n;
++	if (GetModuleFileNameA(g_self_module, path, sizeof(path)) == 0)
++		return 0;
++	slash = strrchr(path, '\\');
++	if (slash == NULL)
++		return 0;
++	strcpy(slash + 1, "TMNFTracer.cfg");
++	f = fopen(path, "r");
++	if (f == NULL)
++		return 0;
++	while (fgets(line, sizeof(line), f) != NULL) {
++		if (strncmp(line, name, len) == 0 && line[len] == '=') {
++			char *v = line + len + 1;
++			v[strcspn(v, "\r\n")] = '\0';
++			n = (DWORD)strlen(v);
++			if (n < size)
++				strcpy(out, v);
++			else
++				n = n + 1;
++			break;
++		}
++	}
++	fclose(f);
++	return n;
++}
++
+ static DWORD WINAPI initialize_dumper(void *unused)
+ {
+ 	HMODULE executable;
+@@ -1043,10 +1081,10 @@ static DWORD WINAPI initialize_dumper(void *unused)
+ 	char track_sha256[65];
+ 	uint32_t i;
+ 	(void)unused;
+-	if (GetEnvironmentVariableA(
++	if (tracer_config(
+ 		    "TMNF_TRACK_PATH", g_output_path, sizeof(g_output_path)) == 0)
+ 		fatal("TMNF_TRACK_PATH is required");
+-	if (GetEnvironmentVariableA(
++	if (tracer_config(
+ 		    "TMNF_TRACK_SHA256", track_sha256,
+ 		    sizeof(track_sha256)) != 64)
+ 		fatal("TMNF_TRACK_SHA256 must contain 64 hexadecimal characters");
+@@ -1078,6 +1116,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
+ 	(void)reserved;
+ 	if (reason == DLL_PROCESS_ATTACH) {
+ 		HANDLE thread;
++		g_self_module = instance;
+ 		DisableThreadLibraryCalls(instance);
+ 		thread = CreateThread(NULL, 0, initialize_dumper, NULL, 0, NULL);
+ 		if (thread == NULL)
+diff --git a/src/world.c b/src/world.c
+index 991bbb1..3297259 100644
+--- a/src/world.c
++++ b/src/world.c
+@@ -2058,8 +2058,8 @@ void World_Destroy(TmnfWorld *world)
+ 	free(world->wheels[0].history);
+ 	free(world->cold->curve_bounds);
+ 	free(world->cold->vehicle_blob);
+-	free(world->cold);
+-	free(world);
++	TMNF_ALIGNED_FREE(world->cold);
++	TMNF_ALIGNED_FREE(world);
+ }
+ 
+ TMNF_HD TmnfPhysicsWorld *World_GetPhysicsWorld(TmnfWorld *world)
+diff --git a/tools/build_track/NuGet.config b/tools/build_track/NuGet.config
+index 5b16675..04a3940 100644
+--- a/tools/build_track/NuGet.config
++++ b/tools/build_track/NuGet.config
+@@ -1,6 +1,7 @@
+ <configuration>
+   <packageSources>
+     <clear />
++    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+     <add key="nuget.gbx.tools" value="https://nuget.gbx.tools/v3/index.json" />
+   </packageSources>
+ </configuration>
+diff --git a/tools/build_track/build_track.py b/tools/build_track/build_track.py
+index 16ff787..49acdca 100644
+--- a/tools/build_track/build_track.py
++++ b/tools/build_track/build_track.py
+@@ -76,13 +76,19 @@ def water_map(track: trkfile.Track) -> trkfile.Water:
+             if surface.materials[mi] != WATER_MATERIAL:
+                 continue
+             cx = cz = 0.0
++            raised = False
+             for v in (v0, v1, v2):
+                 x, y, z = struct.unpack_from("<3f", mesh.vertices, v * 12)
+                 wy = iso[3] * x + iso[4] * y + iso[5] * z + iso[10]
+                 if abs(wy - WATER_LEVEL) > 1e-4:
++                    if os.environ.get("TMNF_LENIENT") == "1":
++                        raised = True        # DeltaZero: raised water is not in the water grid
++                        break
+                     raise BuildError(f"water face at y={wy}, not {WATER_LEVEL}")
+                 cx += (iso[0] * x + iso[1] * y + iso[2] * z + iso[9]) / 3
+                 cz += (iso[6] * x + iso[7] * y + iso[8] * z + iso[11]) / 3
++            if raised:
++                continue
+             fx, fz = int(cx // WATER_CELL), int(cz // WATER_CELL)
+             if not (0 <= fx < WATER_GRID and 0 <= fz < WATER_GRID):
+                 raise BuildError(f"water face outside the grid at ({cx}, {cz})")
+diff --git a/tools/build_track/scene.py b/tools/build_track/scene.py
+index ef9f3c7..2b9ca84 100644
+--- a/tools/build_track/scene.py
++++ b/tools/build_track/scene.py
+@@ -4,6 +4,7 @@ manager sees. Function addresses refer to TmForever.exe (TMNF 2.11.26).
+ """
+ from __future__ import annotations
+ 
++import os
+ import base64
+ from dataclasses import dataclass, field
+ 
+@@ -11,6 +12,10 @@ import fp
+ from assets import Assets, BLOCK_TYPES, BuildError, Remap, Tree
+ 
+ FLAT, FRONTIER, CLASSIC, ROAD, CLIP, PYLON = 0, 1, 2, 3, 4, 7
++# DeltaZero: TMNF_LENIENT=1 builds maps the exact builder rejects (file ground flag kept, flat
++# blocks of no zone placed like classic blocks, missing field units created). Every run on such
++# a track is still checked against the replay's ghost, so a wrong guess only costs that map.
++LENIENT = os.environ.get("TMNF_LENIENT") == "1" or os.environ.get("TMNF_TRUST_FILE_GROUND") == "1"
+ 
+ # CGameCtnFieldUnit terrain kinds (ETerrain).
+ T_TERRAIN, T_GROUND, T_AIR = 0, 1, 3
+@@ -153,9 +158,11 @@ class Block:
+     def sub_variant(self) -> int:
+         return (self.flags >> 6) & 0x3F
+ 
++    as_classic: bool = False
++
+     @property
+     def type(self) -> int:
+-        return BLOCK_TYPES[self.info["type"]]
++        return CLASSIC if self.as_classic else BLOCK_TYPES[self.info["type"]]
+ 
+     def __repr__(self):
+         return f"{self.name}@{self.coord} dir={self.direction} flags={self.flags:#x}"
+@@ -277,6 +284,12 @@ class Challenge:
+             raise BuildError(f"no terrain block under {coord}")
+         return self.zone_from_land_info(b.info)
+ 
++    def zone_or_none(self, info: dict):
++        try:
++            return self.zone_from_land_info(info)
++        except BuildError:
++            return None
++
+     def zone_from_land_info(self, info: dict) -> dict:
+         for z in self.zones.values():
+             for key in ("blockInfoFlat", "blockInfoClip", "blockInfoRoad", "blockInfoPylon", "blockInfoFrontier"):
+@@ -309,6 +322,10 @@ class Challenge:
+             info = self.assets.block_info(raw["name"])
+             self.blocks.append(Block(raw["index"], raw["name"], tuple(raw["coord"]),
+                                      raw["direction"], raw["flags"], info))
++        if LENIENT:
++            for b in self.blocks:
++                if b.type in (FLAT, FRONTIER) and self.zone_or_none(b.info) is None:
++                    b.as_classic = True
+         # Pass 1: terrain blocks fix their height and stamp the column zone.
+         for b in self.blocks:
+             if b.type in (FLAT, FRONTIER):
+@@ -408,6 +425,8 @@ class Challenge:
+             off = rotated_offset(info, 0, b.direction, ground)
+             fu = self.field_unit((x + off[0], 0, z + off[2]))
+             unit = self.make_unit(b, units[0], (x + off[0], y + off[1], z + off[2]))
++            if fu is None and LENIENT:
++                return True
+             fu.unit = unit
+             zone = self.zone_from_land_info(info)
+             depth, height = zone["common"]["depth"], zone["common"]["height"]
+@@ -419,7 +438,11 @@ class Challenge:
+                     fu.unit = self.make_unit(b, units[0], (x, yy, z))
+             return True
+         if ground != b.ground:
+-            raise BuildError(f"{b}: file ground flag {b.ground} but IsBlockOnGround={ground}")
++            if not LENIENT:
++                raise BuildError(f"{b}: file ground flag {b.ground} but IsBlockOnGround={ground}")
++            # DeltaZero: keep the map file's flag (the result is checked against replay ghosts)
++            ground = b.ground
++            units = unit_infos(info, ground)
+         fresh = not b.units
+         for i, ui in enumerate(units):
+             off = rotated_offset(info, i, b.direction, ground)
+@@ -433,6 +456,8 @@ class Challenge:
+             # Road blocks additionally derive a pylon-accept mask here; the
+             # Stadium collection has no pylons so it is not modelled.
+             unit = self.make_unit(b, ui, c) if fresh else b.units[i]
++            if fu is None and LENIENT:
++                continue                 # DeltaZero: unit outside the editable field
+             fu.unit = unit
+             if fu.terrain == T_GROUND:
+                 under = self.block_at((c[0], 0, c[2]))
