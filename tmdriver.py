@@ -148,6 +148,27 @@ def sim_night(args):
              nadeo_replays=args.nadeo_replays, within=args.within, workers=args.workers).run()
 
 
+def virtual(args):
+    """Start virtual game instances (TMNF-C physics, no client) on ports port .. port+n-1 and keep
+    them running until Ctrl+C. Tools then use --port <first port>; the rest are helpers."""
+    import subprocess
+    procs = []
+    for k in range(args.instances):
+        cmd = [sys.executable, '-u', '-m', 'tmdriver.virtual_game', '--port', str(args.port + k)]
+        if args.map_file:
+            cmd += ['--map', args.map_file]
+        procs.append(subprocess.Popen(cmd, cwd=str(Path(__file__).resolve().parent / 'src')))
+    print(f'{args.instances} virtual game instance(s) on ports {args.port}..{args.port + args.instances - 1}; '
+          f'use --port {args.port}. Ctrl+C stops them.')
+    try:
+        while all(p.poll() is None for p in procs):
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+    for p in procs:
+        p.terminate()
+
+
 def tmx_pool(args):
     import json
     from tmdriver import tmx
@@ -390,6 +411,11 @@ def main():
     ni.add_argument('--helpers', default='auto')
     ni.add_argument('--port', type=int, default=P.PORT)
     ni.set_defaults(fn=night)
+    vg = sub.add_parser('virtual', help='virtual game instances (TMNF-C physics, no game client) for rl/improve/drive')
+    vg.add_argument('--instances', type=int, default=4)
+    vg.add_argument('--port', type=int, default=8600)
+    vg.add_argument('--map-file', default='', help='map to start on (else the first `map` command)')
+    vg.set_defaults(fn=virtual)
     sn = sub.add_parser('sim-night', help='overnight WITHOUT the game: fetch TMX maps + replays, re-simulate in TMNF-C')
     sn.add_argument('--hours', type=float, default=8.0)
     sn.add_argument('--min-awards', type=int, default=2, help='maps with at least this many awards')

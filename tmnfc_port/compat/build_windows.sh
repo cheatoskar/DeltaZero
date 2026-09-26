@@ -17,3 +17,6 @@ for t in physics_smoke x87_fp_identity vehicle_aux_smoke vehicle_curve_smoke gat
   "$PY" -m ziglang cc $FLAGS -UNDEBUG "tests/$t.c" build/libtmnf_physics.a -lapi-ms-win-core-synch-l1-2-0 -o "build/$t.exe"
   "./build/$t.exe" > "build/$t.log" 2>&1 && echo "ok   $t" || echo "FAIL $t"
 done
+# DeltaZero's tools: the batch re-simulator and the stepping API for the virtual game
+"$PY" -m ziglang cc $FLAGS compat/tmnfc_batch.c build/libtmnf_physics.a -lapi-ms-win-core-synch-l1-2-0 -o build/tmnfc_batch.exe
+"$PY" -m ziglang cc $FLAGS -shared compat/tmnfc_api.c build/libtmnf_physics.a -lapi-ms-win-core-synch-l1-2-0 -o build/tmnfc_api.dll
