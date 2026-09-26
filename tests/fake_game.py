@@ -219,6 +219,8 @@ class FakeGame(threading.Thread):
         self.cur = self.maps['default']
         self.course = self.cur['course']
         self.pending_exec = []   # a queue, like the plugin (a single slot lost commands)
+        self.vars = {}           # TMInterface variables set through 'set NAME VALUE'
+        self.var_log = []        # every (name, value) set, in order
         self.mode = P.MODE_IDLE
         self.status = ''
         self.drawn = []
@@ -531,6 +533,11 @@ class FakeGame(threading.Thread):
             self.read_message(False, time.monotonic() + 1.0)
         cmds, self.pending_exec = self.pending_exec, []
         for cmd in cmds:
+            if cmd.startswith('set '):
+                parts = cmd.split(None, 2)
+                if len(parts) == 3:
+                    self.vars[parts[1]] = parts[2]
+                    self.var_log.append((parts[1], parts[2]))
             if cmd.startswith('map '):
                 f = cmd[4:].strip().strip('"').replace('\\', '/').split('/')[-1]
                 if f in self.maps:

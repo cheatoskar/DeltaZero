@@ -454,7 +454,6 @@ def helper_sessions(links, uid: str, track_id: Optional[int], log=print) -> list
     for k, h in enumerate(links):
         tag = f'[#{k + 2}]'
         hs = GameSession(h, lambda *a, tag=tag: log(tag, *a))
-        hs.focus = False                    # the window focus belongs to the main instance
         try:
             if not hs.load_map(f, uid):
                 log(f'{tag} did not load the map: not used')

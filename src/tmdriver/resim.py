@@ -11,7 +11,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -129,6 +129,58 @@ def fetch_entry(track_id: int, n_replays: int, log=print) -> dict:
             'replays': [{'file': p.name, 'path': str(p)} for p in res['replays']]}
 
 
+def pending_replays(m: dict, out_root: Path, max_replays: int = 5, only_missing: bool = True) -> list:
+    """The replay entries of a map that still need a re-simulation."""
+    out = []
+    for r in m['replays'][:max_replays]:
+        if 'error' in r or r.get('uid_ok') is False or r.get('respawns', 0) > 0:
+            continue   # respawn replay-through is not verified yet
+        rid = r['file'].split('.')[0]
+        if only_missing and (out_root / str(m['track_id']) / f'{rid}.npz').exists():
+            continue
+        out.append(r)
+    return out
+
+
+class MapNotLoaded(RuntimeError):
+    """The game instance did not load the map (resim_map)."""
+
+
+def resim_map(ss: GameSession, m: dict, shift: int, sign: int, out_root: Path, max_replays: int = 5,
+              only_missing: bool = True, batch: bool = True, load_replay=replay_mod.load, log=print,
+              tag: str = '', status: str = '') -> Optional[List[dict]]:
+    """Re-simulate the pending replays of one map on one game instance: load the map, play every
+    replay, write data/resim/<track_id>/<replay>.npz. None: nothing to do. MapNotLoaded: the
+    instance did not load the map."""
+    eps = []
+    for r in pending_replays(m, out_root, max_replays, only_missing):
+        rid = r['file'].split('.')[0]
+        try:
+            rep = load_replay(r['path'] if 'path' in r else TMX / safe(m['uid']) / r['file'])
+        except Exception as e:
+            log(f"{tag}  unreadable replay {r['file']}: {e!r}"[:160])
+            continue
+        if rep.map_uid != m['uid'] or rep.respawns > 0:     # bulk entries: checked here
+            continue
+        eps.append(ResimEpisode(rep, shift, sign, {
+            'track_id': m['track_id'], 'uid': m['uid'], 'replay': rid, 'player': r.get('player'),
+            'analog': rep.uses_analog_steer, 'holdout': m['holdout']}, out_root))
+    if not eps:
+        return None
+    from .tmx import tracks_dir
+    game_map = tracks_dir() / m['map_file']
+    if not game_map.exists():               # bulk maps: copy data/maps/<id> into the game folder
+        from .bulk import MAP_DIR
+        src = MAP_DIR / f"{m['track_id']}.Challenge.Gbx"
+        if src.exists():
+            game_map.parent.mkdir(parents=True, exist_ok=True)
+            game_map.write_bytes(src.read_bytes())
+    ss.status(f"{status or 'Re-simulation: ' + m['name']} ({len(eps)} replays)")
+    if not ss.load_map(m['map_file'], m['uid']):
+        raise MapNotLoaded(f"{m['track_id']} {m['name']!r} did not load")
+    return ss.run(eps, sim_only=True, batch=batch)
+
+
 # measured on cheatoskar's laptop 2026-09-24 (self test) and in every exact resim run since
 DEFAULT_REPLAY_ALIGNMENT = {'shift': 1, 'steer_sign': -1}
 
@@ -166,7 +218,6 @@ def run_resim(link, only_missing: bool = True, max_replays: int = 5, log=print,
     sessions = [sess]
     for k, h in enumerate(helpers):
         hs = GameSession(h, lambda *a, k=k: log(f'[#{k + 2}]', *a))
-        hs.focus = False            # the window focus belongs to the main instance
         sessions.append(hs)
     log(f'{len(maps)} maps on {len(sessions)} game instance(s); alignment shift {shift}, '
         f'analog steer sign {sign}')
@@ -184,38 +235,15 @@ def run_resim(link, only_missing: bool = True, max_replays: int = 5, log=print,
             except Exception as e:           # not on TMX any more, network: skip this map
                 log(f"{tag}SKIP TMX {m['lazy']}: {e!r}"[:160])
                 return
-        eps = []
-        for r in m['replays'][:max_replays]:
-            if 'error' in r or r.get('uid_ok') is False or r.get('respawns', 0) > 0:
-                continue   # respawn replay-through is not verified yet
-            rid = r['file'].split('.')[0]
-            if only_missing and (out_root / str(m['track_id']) / f'{rid}.npz').exists():
-                continue
-            try:
-                rep = load_replay(r['path'] if 'path' in r else TMX / safe(m['uid']) / r['file'])
-            except Exception as e:
-                log(f"{tag}  unreadable replay {r['file']}: {e!r}"[:160])
-                continue
-            if rep.map_uid != m['uid'] or rep.respawns > 0:     # bulk entries: checked here
-                continue
-            eps.append(ResimEpisode(rep, shift, sign, {
-                'track_id': m['track_id'], 'uid': m['uid'], 'replay': rid, 'player': r.get('player'),
-                'analog': rep.uses_analog_steer, 'holdout': m['holdout']}, out_root))
-        if not eps:
-            return
-        from .tmx import tracks_dir
-        game_map = tracks_dir() / m['map_file']
-        if not game_map.exists():               # bulk maps: copy data/maps/<id> into the game folder
-            from .bulk import MAP_DIR
-            src = MAP_DIR / f"{m['track_id']}.Challenge.Gbx"
-            if src.exists():
-                game_map.parent.mkdir(parents=True, exist_ok=True)
-                game_map.write_bytes(src.read_bytes())
-        ss.status(f"Re-simulation {k + 1}/{len(maps)}: {m['name']} ({len(eps)} replays)")
-        if not ss.load_map(m['map_file'], m['uid']):
+        try:
+            res = resim_map(ss, m, shift, sign, out_root, max_replays=max_replays, only_missing=only_missing,
+                            batch=batch, load_replay=load_replay, log=log, tag=tag,
+                            status=f"Re-simulation {k + 1}/{len(maps)}: {m['name']}")
+        except MapNotLoaded:
             log(f"{tag}SKIP {m['track_id']} {m['name']!r}: map did not load")
             return
-        res = ss.run(eps, sim_only=True, batch=batch)
+        if not res:
+            return
         with lock:
             with open(index_path, 'a', encoding='utf-8') as f:
                 for r in res:

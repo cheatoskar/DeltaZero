@@ -130,6 +130,15 @@ def check_hold(args):
         sys.exit('held runs differ: keep --hold off and send the lines above')
 
 
+def night(args):
+    from tmdriver.instances import connect_helpers
+    from tmdriver.nightly import Night
+    links = [_link(args)] + (connect_helpers(args.port) if args.helpers == 'auto' else [])
+    ports = [l.sock.getpeername()[1] for l in links]
+    Night(links, ports, hours=args.hours, n_maps=args.maps, replays=args.replays,
+          batch=not args.per_tick).run()
+
+
 def tmx_pool(args):
     import json
     from tmdriver import tmx
@@ -213,7 +222,7 @@ def ghost_replays(args):
     build_all(workers=args.workers, rebuild=args.rebuild)
 
 
-GAME_COMMANDS = {'resim', 'improve', 'drive', 'show', 'eval', 'launch', 'rl', 'check-hold'}
+GAME_COMMANDS = {'resim', 'improve', 'drive', 'show', 'eval', 'launch', 'rl', 'check-hold', 'night'}
 
 
 def serve_running() -> bool:
@@ -238,6 +247,8 @@ def main():
     ap.add_argument('--hold', type=int, default=0,
                     help='hold each AI action N ticks in the plugin (5 = one Python round trip per decision; '
                          'not yet verified in the real game)')
+    ap.add_argument('--no-draw', action='store_true',
+                    help='turn off rendering in the game(s) while this command runs (TMInterface draw_game)')
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('install-plugin').set_defaults(fn=install_plugin)
     s = sub.add_parser('serve')
@@ -362,6 +373,14 @@ def main():
     ch.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
     ch.add_argument('--port', type=int, default=P.PORT)
     ch.set_defaults(fn=check_hold)
+    ni = sub.add_parser('night', help='overnight: fetch top TMX maps + replays while re-simulating (serve must NOT run)')
+    ni.add_argument('--hours', type=float, default=8.0)
+    ni.add_argument('--maps', type=int, default=5000, help='size of the map pool (most awarded first)')
+    ni.add_argument('--replays', type=int, default=5, help='fastest replays per map')
+    ni.add_argument('--per-tick', action='store_true', help='answer every tick from Python (slower)')
+    ni.add_argument('--helpers', default='auto')
+    ni.add_argument('--port', type=int, default=P.PORT)
+    ni.set_defaults(fn=night)
     tp = sub.add_parser('tmx-pool', help='map pool from the TMX search: most awarded maps in a time range')
     tp.add_argument('--maps', type=int, default=2000)
     tp.add_argument('--min', type=float, default=5.0, help='minimum author time in seconds')
@@ -379,6 +398,8 @@ def main():
     os.environ['TMDRIVER_DEVICE'] = args.device
     if args.hold > 1:
         os.environ['TMDRIVER_HOLD'] = str(args.hold)
+    if args.no_draw:
+        os.environ['TMDRIVER_DRAW_GAME'] = '0'
     done = os.environ.get('TMDRIVER_JOB_DONE_FILE')
     if not done and args.cmd in GAME_COMMANDS and serve_running():
         sys.exit('Start_DeltaZero.bat (serve) is running: it would take the game connection away from '

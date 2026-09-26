@@ -22,9 +22,28 @@ from .paths import CALIBRATION, LIVE_MAPS, safe
 from .calib import Calibration
 
 
-def focus_game_window() -> bool:
-    """Bring the TMNF window to the foreground (Windows; best effort). In the main menu the
-    game only processes queued map loads while it has focus."""
+def pid_listening_on(port: int) -> Optional[int]:
+    """Windows: the process that listens on a local TCP port, i.e. the game instance whose plugin
+    took that port (instances.py). Get-NetTCPConnection, because netstat's state column is
+    translated (German Windows). None if unknown."""
+    if os.name != 'nt':
+        return None
+    import subprocess
+    try:
+        out = subprocess.run(['powershell', '-NoProfile', '-Command',
+                              f'(Get-NetTCPConnection -State Listen -LocalPort {int(port)} '
+                              f'-ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess'],
+                             capture_output=True, text=True, timeout=20).stdout.strip()
+    except Exception:
+        return None
+    return int(out) if out.isdigit() else None
+
+
+def focus_game_window(pid: Optional[int] = None) -> bool:
+    """Bring the TMNF window to the foreground (Windows; best effort): the window of process
+    `pid` if given (one of several game instances), else the first TMNF window. A game only
+    processes a queued map load while it has focus (seen for background helper instances,
+    2026-09-25)."""
     try:
         import ctypes
         import ctypes.wintypes as W
@@ -41,6 +60,11 @@ def focus_game_window() -> bool:
         n = ctypes.create_unicode_buffer(256)
         user32.GetWindowTextW(h, n, 256)
         if user32.IsWindowVisible(h) and n.value.startswith('TrackMania') and 'Forever' in n.value:
+            if pid is not None:
+                owner = W.DWORD()
+                user32.GetWindowThreadProcessId(h, ctypes.byref(owner))
+                if owner.value != pid:
+                    return True
             found.append(h)
         return True
 
@@ -112,7 +136,8 @@ class GameSession:
             threading.Thread(target=self._pump, args=(link,), daemon=True).start()
         self.q = link._pump_q
         self._held = None      # the start STEP while the plugin is kept waiting (run(keep=True))
-        self.focus = True      # bring the game window to the front for map loads (main instance)
+        self.focus = True      # bring this instance's window to the front for map loads
+        self._pid = None       # its process (found through the plugin's port), for that
         self.stop = None       # a threading.Event: when set, run() ends its episodes early
         # C_HOLD: episodes that allow it (supports_hold) hold each ACTION this many ticks, so the
         # plugin asks Python once per decision instead of every tick. Off (1) until verified in
@@ -124,7 +149,31 @@ class GameSession:
         # TMDRIVER_SKIP_LOAD_SCREENS=0 turns it off (suspected of crashing the game under Wine).
         if os.environ.get('TMDRIVER_SKIP_LOAD_SCREENS', '1') != '0':
             link.execute('set skip_map_load_screens true')
-            link.flush()
+        # TMInterface variables (documented at donadigo.com/tminterface/variables, checked
+        # 2026-09-26): an unfocused game is frame-limited by default, and in simulation-only mode
+        # that throttles the physics (measured: ~57 ticks/s with actions held in the plugin, a
+        # background helper instance). MediaTracker intros can block the start of a race.
+        link.execute('set unfocused_fps_limit false')
+        link.execute('set disable_forced_camera true')
+        # draw_game false stops rendering (simulation keeps running); --no-draw sets it for batch
+        # jobs. Every other connection turns drawing back on, so a window never stays black.
+        draw = os.environ.get('TMDRIVER_DRAW_GAME', '1') != '0'
+        link.execute(f"set draw_game {'true' if draw else 'false'}")
+        link.flush()
+
+    @property
+    def game_pid(self) -> Optional[int]:
+        """The process of the game instance behind this connection (Windows), or None."""
+        if self._pid is None:
+            try:
+                port = self.link.sock.getpeername()[1]
+            except (OSError, AttributeError):
+                return None
+            self._pid = pid_listening_on(port) or 0
+        return self._pid or None
+
+    def focus_window(self) -> bool:
+        return focus_game_window(self.game_pid)
 
     @property
     def map(self) -> Optional[MapInfo]:
@@ -194,7 +243,7 @@ class GameSession:
         templates = [known or 'TMDriver\\{f}']
         for tpl in templates:
             if self.focus:
-                focus_game_window()
+                self.focus_window()
             self._drain()
             form = tpl.format(f=map_file)
             self.link.execute(f'map "{form}"')
@@ -208,7 +257,7 @@ class GameSession:
                 except TimeoutError:
                     # Nothing yet. In the menu the game only loads while it has focus, and a job
                     # console that opened meanwhile may have taken it: bring the game back.
-                    focused = focus_game_window() if self.focus else True
+                    focused = self.focus_window() if self.focus else True
                     if not focused and not warned:
                         self.log('  waiting for the map: please click into the game window once '
                                  '(Windows did not let Python bring it to the front)')
