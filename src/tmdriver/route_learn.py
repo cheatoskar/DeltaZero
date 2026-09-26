@@ -125,7 +125,8 @@ def run(n_maps: int = 400, n_tune: int = 60, n_eval: int = 150, trials: int = 24
     # random search of the parameters on training maps
     rng = np.random.default_rng(0)
     cands = [dict(RP.DEFAULT)] + [{
-        'climb_per_cell': float(rng.uniform(2.0, 4.0)), 'max_drop': float(rng.choice([4, 8, 16, 32, 60])),
+        'climb_per_cell': float(rng.uniform(2.0, 4.0)), 'max_drop': float(rng.choice([8, 16, 32, 60])),
+        'bridge_cost': float(rng.choice([5.0, 10.0, 20.0, 50.0])),
         'jump_cells': int(rng.choice([4, 6, 8, 10, 12])), 'jump_rise': float(rng.choice([0.0, 1.0, 2.0])),
         'jump_cost': float(rng.uniform(1.0, 6.0)), 'drop_cost': float(rng.uniform(0.0, 2.0)),
         'w_learned': float(rng.uniform(0.2, 3.0))} for _ in range(trials - 1)]

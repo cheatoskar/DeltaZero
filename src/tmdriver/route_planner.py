@@ -42,7 +42,7 @@ DIRS = np.array([(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1
 MODEL = DATA / 'route_cost_model.json'
 
 DEFAULT = {'climb_per_cell': 3.0, 'max_drop': 16.0, 'jump_cells': 10, 'jump_rise': 0.0,
-           'jump_cost': 2.0, 'drop_cost': 0.3, 'w_learned': 1.0}
+           'jump_cost': 2.0, 'drop_cost': 0.3, 'w_learned': 1.0, 'bridge_cost': 20.0}
 MATERIAL_BASE = {16: 1.0, 0: 1.0, 1: 1.0, 4: 1.0, 9: 1.1, 7: 0.8, 26: 0.8, 30: 0.9, 8: 1.2, 6: 1.3,
                  2: 1.6, 3: 1.4, 5: 1.6, 14: 1.1, 12: 1.3}
 
@@ -290,12 +290,38 @@ class Planner:
         prob = 1.0 / (1.0 + np.exp(-z))
         return 1.0 + p['w_learned'] * -np.log(np.clip(prob, 1e-4, 1.0))
 
+    def bridged(self, graph, p: dict):
+        """Make every checkpoint and the finish reachable: while a waypoint's nodes cannot be
+        reached from the start and the other waypoints, connect the nearest reached node to the
+        nearest node of that waypoint with an expensive edge (loops, wall rides and odd jumps are
+        not in the grid; the bridge stands for them)."""
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import dijkstra
+        from scipy.spatial import cKDTree
+        g = self.g
+        xyz = np.stack([(g.x + 0.5) * CELL, g.h, (g.z + 0.5) * CELL], 1)
+        targets = self.cp_nodes + [self.fin_nodes]
+        for _ in range(len(targets) + 1):
+            src = np.concatenate([[self.start]] + self.cp_nodes)
+            d = dijkstra(graph, indices=src, min_only=True)
+            reached = np.flatnonzero(np.isfinite(d))
+            missing = [t for t in targets if not np.isfinite(d[t]).any()]
+            if not missing:
+                return graph
+            t = missing[0]
+            dd, k = cKDTree(xyz[reached]).query(xyz[t])
+            j = int(np.argmin(dd))
+            a, b = int(reached[k[j]]), int(t[j])
+            extra = csr_matrix(([float(dd[j]) * p['bridge_cost']], ([a], [b])), shape=graph.shape)
+            graph = graph + extra
+        return graph
+
     def plan(self, p: dict = None, model: Optional[dict] = None) -> Optional[np.ndarray]:
         from scipy.sparse.csgraph import dijkstra
         p = dict(DEFAULT, **(p or {}))
         if not len(self.fin_nodes) or any(len(c) == 0 for c in self.cp_nodes):
             return None
-        graph = self.g.edges(p, self.node_cost(p, model))
+        graph = self.bridged(self.g.edges(p, self.node_cost(p, model)), p)
         groups = [np.array([self.start])] + self.cp_nodes
         tables = [dijkstra(graph, indices=src, min_only=True, return_predecessors=True) for src in groups]
 
@@ -350,8 +376,15 @@ class Planner:
         return np.array(sorted(hit), dtype=np.int64)
 
 
+PACKAGED = Path(__file__).with_name('route_cost_model.json')   # the model shipped with the code
+
+
 def load_model() -> Optional[dict]:
-    return json.loads(MODEL.read_text(encoding='utf-8')) if MODEL.exists() else None
+    """data/route_cost_model.json (a local route-learn run) or the one shipped with the code."""
+    for f in (MODEL, PACKAGED):
+        if f.exists():
+            return json.loads(f.read_text(encoding='utf-8'))
+    return None
 
 
 def plan(challenge: Path, track_id: str = 'plan', log=print) -> Optional[np.ndarray]:
