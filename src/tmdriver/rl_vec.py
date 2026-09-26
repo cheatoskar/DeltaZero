@@ -127,7 +127,7 @@ class Runner:
 def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int = 50, runs: int = 64,
                  cars: int = 32, use_line: bool = False, ckpt: Path = None, lr: float = 1e-5,
                  critic_lr: float = 1e-3, warmup: int = 2, kl_coef: float = 0.1, ent_coef: float = 0.01,
-                 seed: Optional[int] = None, log=print):
+                 kl_max: float = 0.15, seed: Optional[int] = None, log=print):
     from .replaybuild import map_blocks
     from .tmnfc_sim import CarSim
     from .virtual_game import tmi_waypoint
@@ -157,6 +157,10 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
         f" ({'full race layer' if sim.full_route else 'start-only route'}), model {ckpt}")
     log(f'reference line: {line_txt}')
     best, history = None, []
+    # guard against PPO collapse (seen 2026-09-26: 57/65 finished at iteration 21, 0/65 at 38 with
+    # entropy and KL to the start model rising): keep the best policy, and roll back to it with a
+    # halved learning rate when the finish rate halves or the policy drifts too far
+    best_policy, best_rate = None, -1.0
 
     def save(best_now):
         torch.save(dict(torch.load(ckpt, map_location='cpu', weights_only=False), state_dict=model.state_dict(),
@@ -197,6 +201,18 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
                 if decisions else {}
             save(best if improved else None)
             fin = [r['time_ms'] for r in res if r['finished']]
+            rate = len(fin) / max(len(res), 1) - (float(np.median(fin)) / 1e6 if fin else 0.0)
+            rolled = False
+            if rate > best_rate:
+                best_rate = rate
+                best_policy = {k: v.detach().clone() for k, v in model.state_dict().items()}
+                torch.save(dict(torch.load(ckpt, map_location='cpu', weights_only=False),
+                                state_dict=model.state_dict(), rl_on=uid), out_dir / 'model_best.pt')
+            elif best_policy is not None and (rate < 0.5 * best_rate or stats.get('kl_ref', 0) > kl_max):
+                model.load_state_dict(best_policy)
+                for gr in opt.param_groups:
+                    gr['lr'] *= 0.5
+                rolled = True
             ticks = sum(len(r['ticks']) for r in res)
             rec = {'iteration': it + 1, 'greedy': run_text(greedy), 'finished': f'{len(fin)}/{len(res)}',
                    'best': run_text(best), 'best_ms': best['time_ms'], 'decisions': len(decisions),
@@ -210,7 +226,8 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
                 f"{', median ' + str(rec['median_finish_ms'] / 1000) + 's' if fin else ''}, best {rec['best']}"
                 f"{' (new)' if improved else ''}, {rec['ticks_per_s']} ticks/s, "
                 + (f"kl {stats.get('kl_ref')}, " if stats and not rec['critic_only'] else 'critic warm-up, ')
-                + f"{rec['seconds']}s")
+                + f"{rec['seconds']}s" + (f" | rolled back to the best policy, lr {opt.param_groups[0]['lr']:.2g}"
+                                           if rolled else ''))
     except KeyboardInterrupt:
         log('stopped')
         save(best)
