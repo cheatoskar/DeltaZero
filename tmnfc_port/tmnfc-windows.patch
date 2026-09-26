@@ -249,6 +249,25 @@ index 6402540..88afcfb 100644
  		DisableThreadLibraryCalls(instance);
  		thread = CreateThread(NULL, 0, initialize_dumper, NULL, 0, NULL);
  		if (thread == NULL)
+diff --git a/src/vec_env.c b/src/vec_env.c
+index ae679f0..d4a0e32 100644
+--- a/src/vec_env.c
++++ b/src/vec_env.c
+@@ -850,8 +850,14 @@ static void validate_worlds(TmnfVecEnv *env)
+  * are part of the snapshot so a reset does not inherit the previous episode's
+  * gravity scale and drag (F2b, 0.5 mm at tick 2).
+  */
++/* DeltaZero: worlds respawned at a map's start (one captured vehicle for every map) can move
++ * during their spawn tick; their exactness is checked against replay ghosts instead. */
++int tmnf_skip_spawn_check = 0;
++
+ static void validate_spawn(const TmnfVecEnv *env, uint32_t index)
+ {
++	if (tmnf_skip_spawn_check)
++		return;
+ 	const CHmsStateDyna *spawn = &env->reset_snapshots[index].live_state;
+ 	const TmnfRouteInitialState *initial =
+ 		&env->route->start->initial_state;
 diff --git a/src/world.c b/src/world.c
 index 991bbb1..3297259 100644
 --- a/src/world.c

@@ -32,7 +32,8 @@ def lib():
         L.tmc_open.argtypes = [ctypes.c_char_p] * 4 + [ctypes.POINTER(ctypes.c_float), ctypes.c_uint32,
                                                         ctypes.c_uint32]
         L.tmc_close.argtypes = [ctypes.c_void_p]
-        L.tmc_step.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        L.tmc_step.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+        L.tmc_race.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
         L.tmc_reset.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
         L.tmc_state.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_float)]
         L.tmc_capture.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p]
@@ -69,11 +70,12 @@ class InputMapper:
         use_analog = self.ana_tick > self.dig_tick or (
             self.ana_tick == self.dig_tick and self.ana_tick >= 0 and not self.left and not self.right
             and abs(self.analog) / 65536.0 > 0.01)
+        resp = int(bool(b & 64))
         if use_analog:
             return tmnfc.INPUT.pack(0, 0, 0, 0, 0, 0, ts, 0, float(-self.analog) / 65536.0,
-                                    ts, 0, int(up), ts, 0, int(down), 0, 0, 0.0)
+                                    ts, 0, int(up), ts, 0, int(down), 0, resp, 0.0)
         return tmnfc.INPUT.pack(ts, 0, int(self.left), ts, 0, int(self.right), 0, 0, 0.0,
-                                ts, 0, int(up), ts, 0, int(down), 0, 0, 0.0)
+                                ts, 0, int(up), ts, 0, int(down), 0, resp, 0.0)
 
     def copy(self) -> 'InputMapper':
         m = InputMapper()
@@ -87,14 +89,21 @@ class CarSim:
 
     def __init__(self, challenge: Path, track_id: int, n: int = 1, threads: int = 1):
         prep = tmnfc.prepare_map(Path(challenge), str(track_id))
-        route = prep['track'].with_suffix('.tmnfroute')
-        if not route.exists():
-            import sys
-            p = str(ROUTE_PY.parent)
-            if p not in sys.path:
-                sys.path.insert(0, p)
-            import route as route_mod                        # TMNF-C compat/route.py
-            route.write_bytes(route_mod.minimal_route(Path(challenge), prep['spawn']))
+        import sys
+        p = str(ROUTE_PY.parent)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+        import route as route_mod                            # TMNF-C compat/route.py
+        full = prep['track'].with_suffix('.race.tmnfroute')   # the map's real triggers
+        start_only = prep['track'].with_suffix('.tmnfroute')  # multilap / unknown trigger
+        if not full.exists() and not start_only.exists():
+            try:
+                full.write_bytes(route_mod.full_route(Path(challenge)))
+            except ValueError:
+                start_only.write_bytes(route_mod.minimal_route(Path(challenge), prep['spawn']))
+        # full_route: the race layer tracks checkpoints and the finish exactly
+        self.full_route = full.exists()
+        route = full if self.full_route else start_only
         self.n = n
         L = lib()
         spawn = (ctypes.c_float * 12)(*prep['spawn'])
@@ -125,9 +134,14 @@ class CarSim:
     def step(self, actions: Sequence[Tuple[int, int, int]]):
         """One tick for every car; actions[i] = DeltaZero action applied at this race time."""
         data = b''.join(self.mappers[i].pack(self.ticks[i], actions[i]) for i in range(self.n))
-        lib().tmc_step(self.h, data)
+        restarted = ctypes.create_string_buffer(self.n)
+        lib().tmc_step(self.h, data, restarted)
         for i in range(self.n):
             self.ticks[i] += 1
+        again = [i for i in range(self.n) if restarted.raw[i]]
+        if again:                        # a respawn before any checkpoint restarts the race
+            self.reset(again)
+        return again
 
     def reset(self, cars: Sequence[int] = None):
         cars = range(self.n) if cars is None else cars
@@ -145,6 +159,12 @@ class CarSim:
                 'ang_vel': v[15:18], 'wheel_damper': v[18:22], 'wheel_contact': v[22:26] > 0.5,
                 'wheel_sliding': v[26:30] > 0.5, 'wheel_material': v[30:34].astype(np.int32),
                 'rpm': float(v[34]), 'gear': int(v[35])}
+
+    def race(self, i: int) -> dict:
+        out = (ctypes.c_uint32 * 4)()
+        lib().tmc_race(self.h, i, out)
+        return {'checkpoints': int(out[0]), 'finished': bool(out[1]), 'finish_ms': int(out[2]),
+                'respawn_available': bool(out[3])}
 
     def capture(self, i: int):
         buf = ctypes.create_string_buffer(self.snap_size)

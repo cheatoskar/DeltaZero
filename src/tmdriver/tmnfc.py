@@ -216,17 +216,17 @@ def ghost_check(rec: np.ndarray, rep) -> Dict:
             'ghost_samples': len(ts), 'first_off_ms': off}
 
 
-def unsupported(rep) -> Optional[str]:
-    if rep.respawns:
-        return 'respawn'              # needs the race layer (checkpoint spawns): not wired yet
+def unsupported(rep, race_layer: bool = False) -> Optional[str]:
+    if rep.respawns and not race_layer:
+        return 'respawn'              # needs the race layer (checkpoint spawns)
     if any(n == 'Gas' for _, n, _ in rep.events):
         return 'analog gas'           # not mapped to TMNFRaceInputs yet
     return None
 
 
-def resim_map(challenge: Path, track_id: int, replays: List[Path], out_root: Path = RESIM_C,
-              shift: int = 1, sign: int = -1, only_missing: bool = True, log=print) -> List[dict]:
-    """Re-simulate a map's replays without the game. Writes <out_root>/<track_id>/<replay>.npz
+def resim_map_batch(challenge: Path, track_id: int, replays: List[Path], out_root: Path = RESIM_C,
+                    shift: int = 1, sign: int = -1, only_missing: bool = True, log=print) -> List[dict]:
+    """(The first version: tmnfc_batch.exe, one replay at a time, no race layer.) Re-simulate a map's replays without the game. Writes <out_root>/<track_id>/<replay>.npz
     (t, pos, rot, vel, ang_vel per tick, the actions, meta) and returns one result per replay."""
     from . import replay as replay_mod
     from .resim import table_action
@@ -267,4 +267,86 @@ def resim_map(challenge: Path, track_id: int, replays: List[Path], out_root: Pat
                                     act_gas=act[:, 1].astype(np.int16), act_bits=act[:, 2].astype(np.uint8),
                                     meta=json.dumps(meta))
             results.append(meta)
+    return results
+
+
+def resim_map(challenge: Path, track_id: int, replays: List[Path], out_root: Path = RESIM_C,
+              shift: int = 1, sign: int = -1, only_missing: bool = True, log=print) -> List[dict]:
+    """Re-simulate a map's replays without the game: every replay is one car of a CarSim, all
+    stepped together. With the map's real triggers (tmnfc_sim.CarSim.full_route) a run is exact
+    when its ghost matches within 1 mm AND the race layer finishes at the recorded time (and runs
+    with respawns work); otherwise the ghost alone decides. Writes
+    <out_root>/<track_id>/<replay>.npz for exact runs (state every 50 ms, actions per tick)."""
+    from . import replay as replay_mod
+    from .resim import table_action
+    from .tmnfc_sim import CarSim
+    out_dir = out_root / str(track_id)
+    todo = [r for r in replays if not (only_missing and (out_dir / f'{Path(r).name.split(".")[0]}.npz').exists())]
+    if not todo:
+        return []
+    results, cars = [], []
+    sha = hashlib.sha256(Path(challenge).read_bytes()).hexdigest()
+    reps = []
+    for rp in todo:
+        rid = Path(rp).name.split('.')[0]
+        base = {'track_id': track_id, 'replay': rid, 'map_sha256': sha}
+        try:
+            reps.append((base, replay_mod.load(rp)))
+        except Exception as e:                      # noqa: BLE001
+            results.append(dict(base, exact=False, error=f'replay: {e!r}'[:200]))
+    if not reps:
+        return results
+    sim = CarSim(Path(challenge), str(track_id), n=len(reps))
+    try:
+        for base, rep in reps:
+            why = unsupported(rep, sim.full_route)
+            if why:
+                results.append(dict(base, exact=False, skipped=why, recorded_ms=rep.race_time_ms))
+                continue
+            table = replay_mod.input_table(rep, steer_sign=sign)
+            n = (rep.race_time_ms + 200) // TICK + 1
+            cars.append({'base': base, 'rep': rep, 'actions': [table_action(table, k * TICK, shift) for k in range(n)],
+                         'car': len(cars), 't': [], 'state': [], 'restarted': False})
+        if not cars:
+            return results
+        if len(cars) != sim.n:
+            sim.close()
+            sim = CarSim(Path(challenge), str(track_id), n=len(cars))
+        n_max = max(len(c['actions']) for c in cars)
+        idle = (0, 0, 0)
+        for k in range(n_max):
+            for c in cars:                          # state before this tick, race time 10 (k + 1)
+                rt = sim.race_time(c['car'])
+                if rt % STATE_EVERY_MS == 0 and rt <= c['rep'].race_time_ms + 100:
+                    st = sim.state(c['car'])
+                    c['t'].append(rt)
+                    c['state'].append(np.concatenate([st['pos'], st['rot'], st['vel'], st['ang_vel']]))
+            again = sim.step([c['actions'][k] if k < len(c['actions']) else idle for c in cars])
+            for i in again:
+                cars[i]['restarted'] = True
+        for c in cars:
+            rep, st = c['rep'], np.array(c['state'], dtype=np.float32).reshape(-1, 18)
+            rec = np.zeros(len(st), dtype=OUT_REC)
+            rec['t'] = c['t']
+            rec['pos'], rec['rot'], rec['vel'], rec['ang_vel'] = st[:, 0:3], st[:, 3:12], st[:, 12:15], st[:, 15:18]
+            chk = ghost_check(rec, rep)
+            race = sim.race(c['car'])
+            meta = dict(c['base'], recorded_ms=rep.race_time_ms, analog=rep.uses_analog_steer,
+                        respawns=rep.respawns, race_layer=sim.full_route, **chk)
+            if sim.full_route:
+                meta['finish_ms'] = race['finish_ms'] if race['finished'] else None
+                meta['exact'] = bool(chk['exact'] and race['finished'] and race['finish_ms'] == rep.race_time_ms
+                                     and not c['restarted'])
+            if meta['exact']:
+                keep = rec['t'] <= rep.race_time_ms
+                r = rec[keep]
+                act = np.array(c['actions'], dtype=np.int32).reshape(-1, 3)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(out_dir / f"{c['base']['replay']}.npz", t=r['t'], pos=r['pos'], rot=r['rot'],
+                                    vel=r['vel'], ang_vel=r['ang_vel'], act_steer=act[:, 0],
+                                    act_gas=act[:, 1].astype(np.int16), act_bits=act[:, 2].astype(np.uint8),
+                                    meta=json.dumps(meta))
+            results.append(meta)
+    finally:
+        sim.close()
     return results

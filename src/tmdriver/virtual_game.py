@@ -9,10 +9,10 @@ then point a tool at the first port (`rl --port 8600`); the others are found as 
 
 Physics: exact TMNF (see tmnfc.py for what was measured). Timing follows the real game: an
 ACTION answered in the STEP at race time t acts on the tick from t+10 to t+20 (the replay
-alignment measured in-game, shift 1). Checkpoints and the finish are counted by DeltaZero
-here, not by the game's triggers (not modelled offline yet): the car's position entering the
-cell of a checkpoint block, and a finish block once every checkpoint was passed. That makes a
-finish time exact to about a tick; a final run should still be checked in the real game.
+alignment measured in-game, shift 1). Checkpoints, the finish and respawns come from TMNF-C's
+race layer with the map's real trigger boxes (tmnfc_port/compat/route.py): finish times equal
+the replays' on every map checked (73/73). Multilap maps fall back to counting waypoint block
+cells (the finish then comes about 0.1 s early).
 """
 import argparse
 import hashlib
@@ -101,7 +101,14 @@ class VirtualGame(PluginServer):
             self.sim.reset()
 
     def set_inputs(self, steer, gas, bits):
-        self.action = (int(steer), int(gas), int(bits) & ~P.RESPAWN)
+        if self.sim is not None and self.sim.full_route:
+            self.action = (int(steer), int(gas), int(bits))       # the race layer respawns
+        else:
+            self.action = (int(steer), int(gas), int(bits) & ~P.RESPAWN)
+
+    def respawn(self):
+        if self.sim is None or not self.sim.full_route:
+            self.reset_race()            # no checkpoint spawns known: a respawn restarts
 
     def bench_inputs(self):
         self.action = (0, 0, P.UP)
@@ -116,10 +123,20 @@ class VirtualGame(PluginServer):
             if self.rt == 10:
                 self.pending = self.action
             return
-        self.sim.step([self.pending])
+        restarted = self.sim.step([self.pending])
         self.pending = self.action
         self.rt += 10
-        self.waypoints()
+        if restarted:                    # a respawn before any checkpoint restarts the race
+            self.reset_race()
+            return
+        if self.sim.full_route:          # the map's real triggers: exact checkpoints and finish
+            race = self.sim.race(0)
+            self.cps = set(range(race['checkpoints']))
+            if race['finished']:
+                self.finished = True
+                self.rt = race['finish_ms']
+        else:
+            self.waypoints()
 
     def cell_hit(self, pos, cells) -> list:
         x, y, z = float(pos[0]), float(pos[1]), float(pos[2])
