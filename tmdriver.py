@@ -169,6 +169,11 @@ def virtual(args):
         p.terminate()
 
 
+def trainpack(args):
+    from tmdriver.trainpack import build
+    build(zip_it=not args.no_zip)
+
+
 def tmx_pool(args):
     import json
     from tmdriver import tmx
@@ -411,6 +416,9 @@ def main():
     ni.add_argument('--helpers', default='auto')
     ni.add_argument('--port', type=int, default=P.PORT)
     ni.set_defaults(fn=night)
+    tp = sub.add_parser('trainpack', help="sim-night's exact runs + maps -> one compact upload for a training server")
+    tp.add_argument('--no-zip', action='store_true')
+    tp.set_defaults(fn=trainpack)
     vg = sub.add_parser('virtual', help='virtual game instances (TMNF-C physics, no game client) for rl/improve/drive')
     vg.add_argument('--instances', type=int, default=4)
     vg.add_argument('--port', type=int, default=8600)
@@ -437,7 +445,7 @@ def main():
     gr = sub.add_parser('ghost-replays', help='stage A2: TMX replays -> shards with orientation (no game needed)')
     gr.add_argument('--workers', type=int, default=4)
     gr.add_argument('--rebuild', action='store_true')
-    gr.add_argument('--source', default='bulk', help="bulk (replay_shards) | resim_c (sim-night's exact runs -> resim_shards)")
+    gr.add_argument('--source', default='bulk', help="bulk (replay_shards) | resim_c | resim_npz | trainpack (sim-night's exact runs -> resim_shards)")
     gr.set_defaults(fn=ghost_replays)
     args = ap.parse_args()
     os.environ['TMDRIVER_DEVICE'] = args.device

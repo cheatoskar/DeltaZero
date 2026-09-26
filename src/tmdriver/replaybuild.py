@@ -78,6 +78,12 @@ def load_vocab() -> dict:
     (the model can only use block ids it was trained with)."""
     if VOCAB.exists():
         return json.loads(VOCAB.read_text(encoding='utf-8'))
+    from .trainpack import PACK
+    if (PACK / 'vocab.json').exists():                    # a training server: the pack brings it
+        VOCAB.parent.mkdir(parents=True, exist_ok=True)
+        shutil_copy = (PACK / 'vocab.json').read_text(encoding='utf-8')
+        VOCAB.write_text(shutil_copy, encoding='utf-8')
+        return json.loads(shutil_copy)
     import torch
     from .paths import DRIVER_CKPT
     ck = DRIVER_CKPT
@@ -87,6 +93,80 @@ def load_vocab() -> dict:
     VOCAB.parent.mkdir(parents=True, exist_ok=True)
     VOCAB.write_text(json.dumps(vocab), encoding='utf-8')
     return vocab
+
+
+class NpzRun:
+    """A sim-night run (data/resim_c/<track>/<replay>.npz) in the shape build_part reads from a
+    replay: ghost samples every 100 ms (exact simulated positions, orientation from the
+    rotation matrix: forward / up = columns 2 / 1) and the labels from the per-tick actions.
+
+    The actions are the input table rows the re-simulation played (action k = table row k+1,
+    alignment shift 1), so a label taken 10 ms before a sample (see labels()) is action
+    t/10 - 2. The t = 0 sample repeats the first simulated state (the car has not moved yet)."""
+
+    def __init__(self, path, map_uid: str):
+        if isinstance(path, dict):          # a run of a training pack (trainpack.runs_of)
+            z, meta = path, path['meta']
+        else:
+            z = np.load(path, allow_pickle=True)
+            meta = json.loads(str(z['meta']))
+        self.map_uid = map_uid
+        self.race_time_ms = int(meta['recorded_ms'])
+        self.respawns = int(meta.get('respawns') or 0)
+        t = z['t'].astype(np.int64)
+        if isinstance(path, dict):          # already every 100 ms from t = 0
+            self.ghost_t = t
+            self.ghost_pos = z['pos'].astype(np.float64)
+            rot = z['rot'].astype(np.float64)
+        else:
+            keep = (t % G.DT_MS == 0) & (t <= self.race_time_ms)
+            pos, rot = z['pos'][keep].astype(np.float64), z['rot'][keep].astype(np.float64)
+            first_pos, first_rot = z['pos'][:1].astype(np.float64), z['rot'][:1].astype(np.float64)
+            self.ghost_t = np.concatenate([[0], t[keep]])
+            self.ghost_pos = np.concatenate([first_pos, pos])
+            rot = np.concatenate([first_rot, rot])
+        self.ghost_orient = np.concatenate([rot[:, [2, 5, 8]], rot[:, [1, 4, 7]]], 1)
+        steer = z['act_steer'].astype(np.int64)
+        gas = z['act_gas'].astype(np.int64)
+        bits = z['act_bits'].astype(np.int64)
+        idx = np.clip(self.ghost_t // 10 - 2, 0, len(bits) - 1)
+        idx[0] = idx[1] if len(idx) > 1 else idx[0]
+        b, st, gs = bits[idx], steer[idx], gas[idx]
+        analog = (b & P.STEER_ANALOG) > 0
+        kb = np.where(b & P.RIGHT, 1.0, 0.0) - np.where(b & P.LEFT, 1.0, 0.0)
+        self.labels = (np.where(analog, np.clip(st / P.STEER_MAX, -1, 1), kb),
+                       (((b & P.UP) > 0) | (np.abs(gs) >= P.STEER_MAX // 2)).astype(np.float64),
+                       ((b & P.DOWN) > 0).astype(np.float64))
+
+
+def trainpack_sources():
+    """[(track_id, map path, pack file, None, 'pack')] from a training package (trainpack.py)."""
+    from .trainpack import PACK
+    maps = {}
+    for f in (PACK / 'maps').glob('*_*.Challenge.Gbx'):
+        try:
+            maps[int(f.name.split('.')[0].rsplit('_', 1)[1])] = f
+        except ValueError:
+            pass
+    return sorted((int(f.stem), maps[int(f.stem)], f, None, 'pack') for f in (PACK / 'runs').glob('*.npz')
+                  if f.stem.isdigit() and int(f.stem) in maps)
+
+
+def resim_npz_sources():
+    """[(track_id, map path, npz folder, None, 'npz')]: the exact sim-night runs, no replay files
+    needed (what goes to a training server)."""
+    from .tmnfc import RESIM_C
+    maps = {}
+    for f in (DATA / 'maps').glob('*_*.Challenge.Gbx'):
+        try:
+            maps[int(f.name.split('.')[0].rsplit('_', 1)[1])] = f
+        except ValueError:
+            pass
+    out = []
+    for d in sorted(RESIM_C.iterdir()) if RESIM_C.exists() else []:
+        if d.is_dir() and d.name.isdigit() and int(d.name) in maps and any(d.glob('*.npz')):
+            out.append((int(d.name), maps[int(d.name)], d, None, 'npz'))
+    return out
 
 
 def map_blocks(path: Path):
@@ -143,7 +223,7 @@ def build_part(sources, vocab, out_dir: Path, seed: int, log=print) -> dict:
     for src in sources:
         tid, mpath, rdir = src[:3]
         allowed = src[3] if len(src) > 3 else None       # resim_c: only the exact replays
-        if not mpath.exists() or not rdir.exists():
+        if not mpath.exists() or not Path(rdir).exists():
             stats['no_map'] += 1
             continue
         try:
@@ -152,12 +232,18 @@ def build_part(sources, vocab, out_dir: Path, seed: int, log=print) -> dict:
             stats['no_map'] += 1
             continue
         runs = []
-        for f in sorted(rdir.glob('*.Replay.Gbx')):
+        kind = src[4] if len(src) > 4 else 'replay'
+        if kind == 'pack':
+            from .trainpack import runs_of
+            items = list(runs_of(rdir))
+        else:
+            items = sorted(rdir.glob('*.npz' if kind == 'npz' else '*.Replay.Gbx'))
+        for f in items:
             if allowed is not None and f.name.split('.')[0] not in allowed:
                 continue
             stats['replays'] += 1
             try:
-                rep = replay_mod.load(f)
+                rep = NpzRun(f, uid) if kind in ('npz', 'pack') else replay_mod.load(f)
             except Exception:
                 stats['parse_error'] += 1
                 continue
@@ -174,7 +260,7 @@ def build_part(sources, vocab, out_dir: Path, seed: int, log=print) -> dict:
         order = sorted(range(len(runs)), key=lambda i: runs[i][0].race_time_ms)
         for i, (rep, keep) in enumerate(runs):
             other = next((runs[j] for j in order if j != i), None)       # the fastest OTHER run
-            steer, gas, brake = labels(rep)
+            steer, gas, brake = rep.labels if isinstance(rep, NpzRun) else labels(rep)
             t = rep.ghost_t[keep]
             w.add_run(m_idx, mb, t, rep.ghost_pos[keep], steer[keep], gas[keep], brake[keep],
                       other[0].ghost_pos[other[1]] if other else None,
@@ -201,6 +287,10 @@ def build_all(workers: int = 4, rebuild: bool = False, source: str = 'bulk', log
     load_vocab()
     if source == 'resim_c':
         src, root = resim_sources(), RESIM_SHARDS
+    elif source == 'resim_npz':
+        src, root = resim_npz_sources(), RESIM_SHARDS
+    elif source == 'trainpack':
+        src, root = trainpack_sources(), RESIM_SHARDS
     else:
         src, root = map_sources(), REPLAY_SHARDS
     jobs = []

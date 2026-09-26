@@ -1,4 +1,5 @@
 numpy
 pandas
 pyarrow
+scipy
 # torch: install separately (see README), e.g. the cu126 build for GTX 10xx cards
