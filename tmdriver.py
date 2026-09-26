@@ -139,6 +139,15 @@ def night(args):
           batch=not args.per_tick).run()
 
 
+def sim_night(args):
+    os.environ['TMDRIVER_TMX_GAP'] = str(args.tmx_gap)
+    from tmdriver import tmx
+    tmx.MIN_GAP_S = args.tmx_gap
+    from tmdriver.sim_night import SimNight
+    SimNight(hours=args.hours, min_awards=args.min_awards, replays=args.replays,
+             nadeo_replays=args.nadeo_replays, within=args.within, workers=args.workers).run()
+
+
 def tmx_pool(args):
     import json
     from tmdriver import tmx
@@ -381,6 +390,15 @@ def main():
     ni.add_argument('--helpers', default='auto')
     ni.add_argument('--port', type=int, default=P.PORT)
     ni.set_defaults(fn=night)
+    sn = sub.add_parser('sim-night', help='overnight WITHOUT the game: fetch TMX maps + replays, re-simulate in TMNF-C')
+    sn.add_argument('--hours', type=float, default=8.0)
+    sn.add_argument('--min-awards', type=int, default=2, help='maps with at least this many awards')
+    sn.add_argument('--replays', type=int, default=20, help='at most this many replays per map')
+    sn.add_argument('--within', type=float, default=1.05, help='only replays within this factor of the best time')
+    sn.add_argument('--nadeo-replays', type=int, default=100, help="fastest replays on Nadeo's own maps")
+    sn.add_argument('--workers', type=int, default=0, help='simulation processes (default: CPU cores - 1)')
+    sn.add_argument('--tmx-gap', type=float, default=0.15, help='seconds between TMX requests')
+    sn.set_defaults(fn=sim_night)
     tp = sub.add_parser('tmx-pool', help='map pool from the TMX search: most awarded maps in a time range')
     tp.add_argument('--maps', type=int, default=2000)
     tp.add_argument('--min', type=float, default=5.0, help='minimum author time in seconds')

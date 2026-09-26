@@ -20,7 +20,8 @@ from typing import Dict, List
 
 BASE = 'https://tmnf.exchange'
 UA = 'TMDriverAI-research/0.1 (non-commercial; contact: cheatoskar)'
-MIN_GAP_S = 1.0
+# seconds between requests (one lock for all threads); TMDRIVER_TMX_GAP overrides
+MIN_GAP_S = float(os.environ.get('TMDRIVER_TMX_GAP', '1.0'))
 _last = [0.0]
 _lock = threading.Lock()   # the gap is global across threads (bulk.py runs several)
 
@@ -133,11 +134,13 @@ def tracks_dir() -> Path:
     return game_dir() / 'Tracks' / 'Challenges' / 'TMDriver'
 
 
-def fetch(track_id: int, n_replays: int, tmx_root: Path, safe_uid, log=print, reps=None) -> Dict:
+def fetch(track_id: int, n_replays: int, tmx_root: Path, safe_uid, log=print, reps=None,
+          map_dir: Path = None) -> Dict:
+    """map_dir: where the map goes (default: the game's TMDriver folder, so the game can load it)."""
     info = track_info(track_id)
     uid = info['UId']
     name = info['TrackName'].replace('.Challenge', '')
-    mdir = tracks_dir()
+    mdir = map_dir or tracks_dir()
     mdir.mkdir(parents=True, exist_ok=True)
     mpath = mdir / f'{safe_name(name)}_{track_id}.Challenge.Gbx'
     if not mpath.exists():
@@ -145,7 +148,7 @@ def fetch(track_id: int, n_replays: int, tmx_root: Path, safe_uid, log=print, re
     rdir = tmx_root / safe_uid(uid)
     rdir.mkdir(parents=True, exist_ok=True)
     got = []
-    for r in (reps if reps is not None else replay_list(track_id))[:n_replays]:
+    for r in (reps if reps is not None else replay_list(track_id, max(25, n_replays)))[:n_replays]:
         rp = rdir / f"{r['ReplayId']}.Replay.Gbx"
         if not rp.exists():
             rp.write_bytes(get(f"{BASE}/recordgbx/{r['ReplayId']}"))
