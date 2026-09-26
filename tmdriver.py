@@ -174,6 +174,28 @@ def trainpack(args):
     build(zip_it=not args.no_zip)
 
 
+def route_learn(args):
+    from tmdriver.route_learn import run
+    run(n_maps=args.maps, n_tune=args.tune, n_eval=args.eval, trials=args.trials)
+
+
+def rl_vec(args):
+    from tmdriver.rl_vec import rl_vec_train
+    from tmdriver.virtual_game import map_dirs
+    f = Path(args.map_file) if args.map_file else None
+    if f is None:
+        for d in map_dirs():
+            hits = sorted(Path(d).glob(f'*_{args.map}.Challenge.Gbx'))
+            if hits:
+                f = hits[0]
+                break
+    if f is None:
+        sys.exit(f'no map file for {args.map} (download it first, e.g. with sim-night or rl --map)')
+    rl_vec_train(f, track_id=args.map, iterations=args.iterations, runs=args.runs, cars=args.cars,
+                 use_line=args.line, ckpt=args.model or None, lr=args.lr, warmup=args.warmup, kl_coef=args.kl,
+                 seed=args.seed)
+
+
 def tmx_pool(args):
     import json
     from tmdriver import tmx
@@ -419,6 +441,25 @@ def main():
     tp = sub.add_parser('trainpack', help="sim-night's exact runs + maps -> one compact upload for a training server")
     tp.add_argument('--no-zip', action='store_true')
     tp.set_defaults(fn=trainpack)
+    rl2 = sub.add_parser('route-learn', help='learn the route planner costs from record lines; held-out report')
+    rl2.add_argument('--maps', type=int, default=400)
+    rl2.add_argument('--tune', type=int, default=60)
+    rl2.add_argument('--eval', type=int, default=150)
+    rl2.add_argument('--trials', type=int, default=24)
+    rl2.set_defaults(fn=route_learn)
+    rv = sub.add_parser('rl-vec', help='RL v2 without the game, batched: N cars in one TMNF-C world')
+    rv.add_argument('--map', type=int, default=None, help='TMX id')
+    rv.add_argument('--map-file', default='')
+    rv.add_argument('--iterations', type=int, default=50)
+    rv.add_argument('--runs', type=int, default=64, help='sampled runs per iteration (+1 greedy)')
+    rv.add_argument('--cars', type=int, default=32, help='cars driving at once')
+    rv.add_argument('--line', action='store_true')
+    rv.add_argument('--lr', type=float, default=1e-5)
+    rv.add_argument('--warmup', type=int, default=2)
+    rv.add_argument('--kl', type=float, default=0.1)
+    rv.add_argument('--model', default='')
+    rv.add_argument('--seed', type=int, default=None)
+    rv.set_defaults(fn=rl_vec)
     vg = sub.add_parser('virtual', help='virtual game instances (TMNF-C physics, no game client) for rl/improve/drive')
     vg.add_argument('--instances', type=int, default=4)
     vg.add_argument('--port', type=int, default=8600)

@@ -203,6 +203,10 @@ class GhostPolicy:
                orient=None):
         state, route, pos, psi = self.features(t, orient, pace)
         out = self.forward(state, route, pos, psi)
+        return self.choose(out, sample, temp, rng)
+
+    def choose(self, out, sample: bool = False, temp: float = 1.0, rng=None):
+        """The action from one model output (batch of 1)."""
         logits = out['steer'][0].float()
         if sample:
             pr = torch.softmax(logits / temp, -1).cpu().numpy()
@@ -230,6 +234,46 @@ class GhostPolicy:
             self.action = self.decide(t, pace, sample, temp, rng, orient)
             self.last_decision_t = t
         return self.action
+
+
+    # ------------------------------------------------------------------ batched acting (rl_vec.py)
+    def act_begin(self, step: P.Step, pace: float = 0.0):
+        """First half of act(): observe; (t, features) when a decision is due, else (t, None)
+        and self.action (or (0, 0, 0) before the start) holds."""
+        t = self.observe(step)
+        if t < 0 or not (self.last_decision_t is None or t - self.last_decision_t >= self.decide_ms):
+            return t, None
+        orient = None
+        if self.orient_used:
+            m = np.asarray(step.rot, dtype=np.float64).reshape(3, 3)
+            orient = np.concatenate([m[:, 2], m[:, 1]])[None]
+        return t, self.features(t, orient, pace)
+
+    def act_end(self, t: int, x_row, out_row, sample: bool = False, temp: float = 1.0, rng=None):
+        """Second half: the model's output for this car (batch of 1) -> the action."""
+        self.last_inputs = x_row
+        self.action = self.choose(out_row, sample, temp, rng)
+        self.last_decision_t = t
+        return self.action
+
+
+@torch.no_grad()
+def forward_many(policy: GhostPolicy, feats: list):
+    """One model call for many cars on the same map: feats = [(state, route, pos, psi)] ->
+    [(inputs batch-1 tuple, outputs batch-1 dict)] in the same order."""
+    d = policy.device
+    n = len(feats)
+    center, heading, name, wp, tb, valid = policy._bt
+    pos = torch.as_tensor(np.stack([f[2] for f in feats]), dtype=torch.float32, device=d)
+    psi = torch.as_tensor(np.concatenate([f[3] for f in feats]), dtype=torch.float32, device=d)
+    bn, bw, bf, bm = block_features(center.expand(n, -1, -1), heading.expand(n, -1), name.expand(n, -1),
+                                    wp.expand(n, -1), tb.expand(n, -1), valid.expand(n, -1), pos, psi)
+    x = (torch.as_tensor(np.concatenate([f[0] for f in feats]), device=d),
+         torch.as_tensor(np.concatenate([f[1] for f in feats]), device=d), bn, bw, bf, bm)
+    out = policy.model(*x)
+    # one transfer for the whole batch (a per-car .cpu() synchronises the GPU every time)
+    cpu = {k: out[k].float().cpu() for k in ('steer', 'gas', 'brake', 'value')}
+    return [(tuple(v[i:i + 1] for v in x), {k: v[i:i + 1] for k, v in cpu.items()}) for i in range(n)]
 
 
 def to_action(b: int, gas: bool, brake: bool):

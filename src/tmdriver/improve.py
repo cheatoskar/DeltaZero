@@ -85,6 +85,38 @@ class ImproveEpisode(Episode):
             o = pol.last_out
             # (inputs, steer bin, gas, brake, race time, progress so far): rl.py makes rewards from the last two
             self.decisions.append((pol.last_inputs, o['bin'], o['gas'], o['brake'], st.race_time, pol.progress_m))
+        return self._after(st, a, dt)
+
+    # two-phase acting for batched driving (rl_vec.py): same rules as act()
+    def act_begin(self, st):
+        """-> ('end', None) | ('act', action or None) | ('decide', (t, features))."""
+        dt = max(0, st.race_time - self.last_t)
+        self.last_t = st.race_time
+        self._dt = dt
+        if st.finished:
+            self.finish, self.reason = st.race_time, 'finish'
+            return 'end', None
+        if st.race_time > self.limit:
+            self.reason = 'time limit'
+            return 'end', None
+        if st.race_time == 1000:
+            self.start_kmh = int(st.display_speed)
+        t, feats = self.policy.act_begin(st)
+        if feats is not None:
+            return 'decide', (t, feats)
+        a = self.policy.action if t >= 0 else (0, 0, 0)
+        return 'act', self._after(st, a, dt)
+
+    def act_end(self, st, t, x_row, out_row):
+        pol = self.policy
+        a = pol.act_end(t, x_row, out_row, sample=self.temp > 0, temp=max(self.temp, 1e-3), rng=self.rng)
+        o = pol.last_out
+        self.decisions.append((pol.last_inputs, o['bin'], o['gas'], o['brake'], st.race_time, pol.progress_m))
+        return self._after(st, a, self._dt)
+
+    def _after(self, st, a, dt):
+        """Record the tick; the stall rules; -> the action, or None when the run ends."""
+        pol = self.policy
         if st.race_time >= 0:
             # the held ticks too (C_HOLD): the plugin re-applies this action without asking
             for k in range(max(1, self.hold)):
