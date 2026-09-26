@@ -473,6 +473,8 @@ def reference(uid: str, track_id: Optional[int], log=print):
     reference_setup), so that driving backwards or off the map never counts as progress."""
     from .policy import reference_positions, track_id_for
     tid = track_id or track_id_for(uid)
+    if os.environ.get('TMDRIVER_ROUTE') == 'plan':        # as if nobody had driven the map yet
+        return planned_route(uid, tid, log)
     ref = reference_positions(uid, tid)
     if ref is None:
         from . import tmx
@@ -485,7 +487,29 @@ def reference(uid: str, track_id: Optional[int], log=print):
                 ref = reference_positions(uid, tid)
         except Exception as e:           # offline, TMX down: drive without the line
             log(f'  TMX: {e}')
+    if ref is None:
+        ref = planned_route(uid, tid, log)
     return ref
+
+
+def planned_route(uid: str, track_id: Optional[int], log=print):
+    """The route planner's line (route_planner.py: from the map's geometry, no run needed), as
+    (positions, source), or None."""
+    try:
+        from . import tmx
+        from .route_planner import plan
+        name = map_file_for(uid, track_id, log)
+        if not name:
+            return None
+        path = tmx.tracks_dir() / name
+        log(f'planning a route from the map geometry ({path.name}) ...')
+        route = plan(path, f'plan_{safe(uid)}', log=log)
+        if route is None:
+            return None
+        return route, f'planned route ({np.linalg.norm(np.diff(route, axis=0), axis=1).sum():.0f} m)'
+    except Exception as e:               # no TMNF-C set up, or no path found
+        log(f'  route planner: {e!r}'[:200])
+        return None
 
 
 def reference_setup(uid: str, track_id: Optional[int], use_line: bool, log=print):
