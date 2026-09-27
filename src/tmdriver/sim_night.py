@@ -102,6 +102,15 @@ def _work(job):
         return job, res, None
     except Exception as e:                           # noqa: BLE001
         return job, None, repr(e)[:300]
+    finally:
+        # the built track is ~14 MB and rebuilt in ~2 s when needed (tmnfc.prepare_map); keeping all
+        # of them filled the home PC's disk on 2026-09-27 (27k maps, 298 GB). Routes and the
+        # re-bound vehicle are small and stay.
+        for f in (tmnfc.CACHE / str(job['track_id'])).glob('*.tmnftrack'):
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
 
 class SimNight:
