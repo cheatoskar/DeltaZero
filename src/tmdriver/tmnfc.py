@@ -109,10 +109,13 @@ def prepare_map(challenge: Path, key: str) -> Dict:
     sha = hashlib.sha256(challenge.read_bytes()).hexdigest()
     d = CACHE / key
     d.mkdir(parents=True, exist_ok=True)
-    track = d / f'{sha[:16]}.tmnftrack'
+    # the display quality the replay's driver played with: some decorations are collidable only
+    # at one quality (scene.py decorate_solid, collidableCond)
+    quality = os.environ.get('TMNF_QUALITY', 'low')
+    track = d / (f'{sha[:16]}.tmnftrack' if quality == 'low' else f'{sha[:16]}.{quality}.tmnftrack')
     if not track.exists():
         r = subprocess.run([sys.executable, str(BUILD_TRACK), str(challenge), '-o', str(track),
-                            '--packs', PACKS], capture_output=True, text=True)
+                            '--packs', PACKS, '--quality', quality], capture_output=True, text=True)
         if r.returncode != 0:
             msg = (r.stderr or r.stdout).strip().splitlines()
             raise RuntimeError(f'track build failed ({LENIENT_TAG}): ' + (msg[-1] if msg else '?'))
