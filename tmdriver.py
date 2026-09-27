@@ -193,7 +193,7 @@ def rl_vec(args):
         sys.exit(f'no map file for {args.map} (download it first, e.g. with sim-night or rl --map)')
     rl_vec_train(f, track_id=args.map, iterations=args.iterations, runs=args.runs, cars=args.cars,
                  use_line=args.line, ckpt=args.model or None, lr=args.lr, warmup=args.warmup, kl_coef=args.kl,
-                 seed=args.seed)
+                 eval_temp=args.eval_temp, seed=args.seed)
 
 
 def tmx_pool(args):
@@ -459,6 +459,8 @@ def main():
     rv.add_argument('--kl', type=float, default=0.1)
     rv.add_argument('--model', default='')
     rv.add_argument('--seed', type=int, default=None)
+    rv.add_argument('--eval-temp', type=float, default=0.7,
+                    help='temperature of the per-iteration evaluation run (argmax never finishes, see rl_vec.py)')
     rv.set_defaults(fn=rl_vec)
     vg = sub.add_parser('virtual', help='virtual game instances (TMNF-C physics, no game client) for rl/improve/drive')
     vg.add_argument('--instances', type=int, default=4)

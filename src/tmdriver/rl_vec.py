@@ -127,7 +127,7 @@ class Runner:
 def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int = 50, runs: int = 64,
                  cars: int = 32, use_line: bool = False, ckpt: Path = None, lr: float = 1e-5,
                  critic_lr: float = 1e-3, warmup: int = 2, kl_coef: float = 0.1, ent_coef: float = 0.01,
-                 kl_max: float = 0.15, seed: Optional[int] = None, log=print):
+                 kl_max: float = 0.15, eval_temp: float = 0.7, seed: Optional[int] = None, log=print):
     from .replaybuild import map_blocks
     from .tmnfc_sim import CarSim
     from .virtual_game import tmi_waypoint
@@ -153,7 +153,7 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0)
     copt = torch.optim.AdamW(critic.parameters(), lr=critic_lr, weight_decay=0.0)
     seed = int(np.random.default_rng().integers(1_000_000)) if seed is None else seed
-    log(f"rl-vec {name!r}: {iterations} iterations x ({runs} sampled + greedy) on {cars} cars in one TMNF-C world"
+    log(f"rl-vec {name!r}: {iterations} iterations x ({runs} sampled + 1 evaluation run at temperature {eval_temp}) on {cars} cars in one TMNF-C world"
         f" ({'full race layer' if sim.full_route else 'start-only route'}), model {ckpt}")
     log(f'reference line: {line_txt}')
     best, history = None, []
@@ -176,13 +176,16 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
         for it in range(iterations):
             t0 = time.perf_counter()
             model.eval()
-            eps = [ImproveEpisode(policy_view(policy), limit, 0.0, seed)]
+            # the evaluation run: temperature eval_temp with a fixed seed, not argmax. Measured 2026-09-27 on
+            # lolsport: argmax (and 0.3) never finishes, 0.7 finished 12/12 with the RL model (the policy
+            # dithers between steer bins every 50 ms as a stand-in for analog steering)
+            eps = [ImproveEpisode(policy_view(policy), limit, eval_temp, 12345)]
             for _ in range(runs):
                 seed += 1
                 eps.append(ImproveEpisode(policy_view(policy), limit, 1.0, seed))
             res = runner.run(eps)
             t_roll = time.perf_counter() - t0
-            greedy, sampled = res[0], res[1:]
+            evaluation, sampled = res[0], res[1:]
             decisions, rewards, dones = [], [], []
             for r in sampled:
                 st_ = episode_steps(r)
@@ -214,7 +217,7 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
                     gr['lr'] *= 0.5
                 rolled = True
             ticks = sum(len(r['ticks']) for r in res)
-            rec = {'iteration': it + 1, 'greedy': run_text(greedy), 'finished': f'{len(fin)}/{len(res)}',
+            rec = {'iteration': it + 1, 'eval': run_text(evaluation), 'finished': f'{len(fin)}/{len(res)}',
                    'best': run_text(best), 'best_ms': best['time_ms'], 'decisions': len(decisions),
                    'median_finish_ms': int(np.median(fin)) if fin else None,
                    'rollout_s': round(t_roll, 1), 'seconds': round(time.perf_counter() - t0, 1),
@@ -222,7 +225,7 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
             history.append(rec)
             with open(out_dir / 'progress.jsonl', 'a', encoding='utf-8') as f:
                 f.write(json.dumps(dict(rec, time=time.strftime('%H:%M:%S'))) + '\n')
-            log(f"iteration {it + 1}: greedy {rec['greedy']}, {rec['finished']} finished"
+            log(f"iteration {it + 1}: eval {rec['eval']}, {rec['finished']} finished"
                 f"{', median ' + str(rec['median_finish_ms'] / 1000) + 's' if fin else ''}, best {rec['best']}"
                 f"{' (new)' if improved else ''}, {rec['ticks_per_s']} ticks/s, "
                 + (f"kl {stats.get('kl_ref')}, " if stats and not rec['critic_only'] else 'critic warm-up, ')
