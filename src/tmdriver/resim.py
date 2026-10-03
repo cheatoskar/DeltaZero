@@ -181,7 +181,7 @@ def resim_map(ss: GameSession, m: dict, shift: int, sign: int, out_root: Path, m
     return ss.run(eps, sim_only=True, batch=batch)
 
 
-# measured on cheatoskar's laptop 2026-09-24 (self test) and in every exact resim run since
+# measured locally 2026-09-24 (self test) and in every exact resim run since
 DEFAULT_REPLAY_ALIGNMENT = {'shift': 1, 'steer_sign': -1}
 
 

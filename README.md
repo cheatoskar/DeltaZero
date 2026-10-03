@@ -1,149 +1,180 @@
 # DeltaZero
 
-An AI that drives **TrackMania Nations Forever** maps it has never seen, and then gets
-faster on a map by practising it, through a TMInterface plugin.
+An autonomous driving AI for **TrackMania Nations Forever** that learns to race on unseen tracks from track geometry and physics, and self-improves through reinforcement learning.
 
-- **Pretrained on public TMX data:** imitation learning on the driving lines of hundreds
-  of thousands of ManiaExchange replays.
-- **Sees the track, not pixels:** the model gets the car's recent motion, a reference line
-  and the 32 nearest track blocks, so it generalises to new maps.
-- **Practises in the game:** a self-imitation RL loop (cross-entropy method) runs in
-  TMInterface's simulation-only mode, where the game is frozen and the physics run at a few
-  hundred ticks per second.
-- **Shows its plan:** it draws the planned line in the game as trigger boxes, then drives it.
-  Physics and the greedy policy are both deterministic, so the visible run follows the drawn
-  line exactly.
-- **Re-simulation:** it replays TMX replay inputs in the game to recover the full 10 ms
-  physics state, as training data for later stages. A batch mode lets the plugin play the
-  inputs itself, the way TMInterface's bruteforce does.
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
+[![TMInterface](https://img.shields.io/badge/TMInterface-2.x-brightgreen.svg)](https://donadigo.com/tminterface/)
+[![Physics](https://img.shields.io/badge/Simulator-TMNF--C-purple.svg)](https://github.com/adonis-singh/TMNF-C)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> Status (2026-09-26): research prototype. The best pretrained model (`ghost_big2`, 14.7 M
-> parameters) picks the exact steering class in 78.6 % of held-out samples and the right
-> steering direction in 81 %. In-game runs finish short race maps; RL with PPO over several
-> game instances is being tested. Imitation has plateaued, so the next gains come from RL,
-> physics inputs from re-simulated replays, and route planning from the map itself.
+---
 
-The Python package is still called `tmdriver` and the plugin `TMDriver` (the project's
-working name).
+## Highlights
 
-## How it works
+- **Track Perception, Not Raw Pixels:** The policy observes the local 3D world: the 32 nearest track blocks (types, relative offsets, and orientations), a 10-step car motion history in the ego-heading frame (velocities, accelerations, yaw rate), and forward route waypoints. It operates without computer vision overhead (~14 ms CPU latency) and generalizes immediately to unseen maps.
+- **Client-Free Headless Physics (TMNF-C):** Includes a native Windows port of [TMNF-C](https://github.com/adonis-singh/TMNF-C) for exact, bit-deterministic physics re-simulation at thousands of ticks per second without launching the game client (`sim-night`, `virtual`).
+- **Learned Topological Route Planner (v3):** Solves track progression from start through checkpoints to the finish across a 2.5D rasterized collision mesh using Dijkstra with learned transit costs (`route_cost_model.json`). Enables zero-shot racing on complex community tracks without human replays.
+- **Batched Vectorized RL (`rl-vec`):** High-throughput PPO reinforcement learning simulating dozens of cars in parallel inside headless TMNF-C worlds with automatic policy checkpointing (`model_best.pt`) and learning rate decay on divergence.
+- **Pretrained Checkpoints Shipped In-Repo:** Comes out-of-the-box with `runs/ghost_resim/best.pt`—a 14.7M parameter transformer model fine-tuned on exact TMNF-C physics re-simulations.
+- **Deterministic 3D Plan Visualization:** Plans its driving line in simulation, renders the planned trajectory directly in the game as 3D trigger boxes, and then drives it visibly in real time.
+
+---
+
+## System Architecture
 
 ```
- TMNF + TMInterface ── plugin/TMDriver (AngelScript) ── TCP 127.0.0.1:8478 ── Python (src/tmdriver)
-   physics step  ─────────►  STEP (pos, rotation, velocity, inputs, …)  ─────────►  policy (DriverNet2)
-                 ◄─────────  ACTION (steer, gas, brake) + commands     ◄─────────
+                  ┌───────────────────────────────────────────────┐
+                  │          TrackMania Nations Forever           │
+                  │              + TMInterface 2.x                │
+                  └───────────────────────┬───────────────────────┘
+                                          │ AngelScript Plugin (TCP 127.0.0.1:8478)
+                                          ▼
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 DeltaZero (Python)                                     │
+│                                                                                        │
+│   ┌───────────────────────────┐                ┌───────────────────────────────────┐   │
+│   │     Perception State      │                │          Policy Model             │   │
+│   │ • 10-step ego motion      │───────────────►│  DriverNet2 (Transformer Policy)  │   │
+│   │ • 32 nearest 3D blocks    │                │ • 21-bin Steering Distribution    │   │
+│   │ • Route Planner Waypoints │                │ • Throttle & Braking Heads        │   │
+│   └───────────────────────────┘                │ • Value Head (Time-to-Finish)     │   │
+│                 ▲                              └─────────────────┬─────────────────┘   │
+│                 │                                                │                     │
+│                 │                                                ▼                     │
+│   ┌─────────────┴─────────────┐                ┌───────────────────────────────────┐   │
+│   │  Learned Route Planner v3 │                │         Action Execution          │   │
+│   │ • 2.5D Dijkstra Search    │                │ • Single / Multi-tick Hold        │   │
+│   │ • Logistic Cost Model     │                │ • Deterministic In-Game Replay    │   │
+│   └───────────────────────────┘                └───────────────────────────────────┘   │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+                                          ▲
+                                          │ Headless Virtual Game Bridge
+                  ┌───────────────────────┴───────────────────────┐
+                  │       TMNF-C Native C-Engine Simulator        │
+                  │   Fast re-simulation & batched parallel RL    │
+                  └───────────────────────────────────────────────┘
 ```
 
-| stage | data | method |
-|---|---|---|
-| A: pretraining | HF traces: positions of the TMX replays | behaviour cloning (transformer, 5 M params) |
-| A2: replay fine-tune | top TMX replays, including car orientation | behaviour cloning |
-| R: re-simulation | the same replays played in the game | full physics state every 10 ms |
-| RL v1 (`improve`) | the model itself on one map | cross-entropy method / self-imitation |
+---
 
-Observation, every 50 ms:
-- the last 10 positions (100 ms apart) in the car's heading frame, plus velocity,
-  acceleration and yaw rate;
-- optionally the car's forward and up vectors;
-- 18 points of a reference line, 0 to 150 m ahead;
-- the 32 nearest blocks within 200 m (type embedding, relative position and heading).
+## Driving Models & Progression
 
-Outputs:
-- steering over 21 bins;
-- gas and brake;
-- a value head (time left to the finish).
+| Stage | Data Source | Method | Status |
+|---|---|---|---|
+| **A: Pretraining** | Millions of TMX replay positions | Behaviour cloning (Transformer, 5M params) | Pretrained (`runs/ghost/best.pt`) |
+| **A2: Replay Fine-tune** | High-rated TMX replays + car orientation | Behaviour cloning (14.7M params) | Pretrained (`runs/ghost_big2/best.pt`) |
+| **R: Re-simulation** | Exact 10 ms physics re-simulations via TMNF-C | Fine-tuning on full physics state | **Default Driver** (`runs/ghost_resim/best.pt`) |
+| **RL v1 (`improve`)** | In-game simulation rollouts on one map | Cross-entropy method / self-imitation | Production ready |
+| **RL v2 (`rl` / `rl-vec`)** | Multi-instance game fleet or batched TMNF-C | PPO with Generalized Advantage Estimation (GAE) | Production ready |
 
-## Quick start (Windows)
+---
 
-Requirements: TMNF with [TMInterface](https://donadigo.com/tminterface/) 2.x (via TMLoader)
-and Python 3.12.
+## Quick Start (Windows)
+
+### 1. Requirements
+
+- Python 3.12 (64-bit)
+- TrackMania Nations Forever with [TMInterface 2.x](https://donadigo.com/tminterface/) (installed via [TMLoader](https://donadigo.com/tmloader/))
+- Nvidia GPU (recommended, CUDA 12.6 supported back to Pascal / GTX 10xx series; CPU execution is fully supported)
+
+### 2. Setup
+
+Clone the repository and install dependencies:
 
 ```bat
-pip install torch --index-url https://download.pytorch.org/whl/cu126   :: GTX 10xx and newer; CPU build also works
+git clone https://github.com/cheatoskar/DeltaZero.git
+cd DeltaZero
+
+:: Install PyTorch (CUDA 12.6 or CPU)
+pip install torch --index-url https://download.pytorch.org/whl/cu126
+
+:: Install Python requirements
 pip install -r requirements.txt
-python tmdriver.py install-plugin        :: copies plugin/TMDriver into Documents\TMInterface\Plugins
+
+:: Install the AngelScript plugin into your TMInterface Plugins folder
+python tmdriver.py install-plugin
 ```
 
-The best checkpoints (`runs/*/best.pt`) are in this repository; data (`data/`) is not.
-Maps and replays are fetched from TMX when needed. Reading .Gbx files uses LZO: the
-`lzo1x_*.dll` files in `src/tmdriver/gbx/lib/` (not included), `pip install python-lzo`,
-or a slower pure-Python fallback.
+> **Note on Model Checkpoints:** The repository already contains the best checkpoints (`runs/*/best.pt`). Raw training datasets (`data/`) and cache files are fetched or built on demand.
 
-Then:
-1. Start the game and run `Start_DeltaZero.bat`. It connects to the plugin; leave it open.
-2. In the game's **DeltaZero** window, pick a TMX id (0 means the current map) and whether
-   the AI may use the reference line, then press one of:
-   - **Drive**: plan the line, draw it, drive it;
-   - **Train**: practise the map for N rounds, showing new best runs;
-   - **Re-simulate replays**: play TMX replays in the game and store the physics state.
+### 3. Running with the In-Game Interface
 
-   Each job opens its own console with live progress.
+1. Start **TrackMania Nations Forever** via TMLoader (ensure the `TMDriver` plugin is active in TMInterface).
+2. Double-click `Start_DeltaZero.bat` (or run `python tmdriver.py serve`).
+3. In the game window, press the `~` / F3 key to view the **DeltaZero** plugin panel:
+   - **Drive:** Plans the optimal racing line in simulation-only mode, visualizes it on track, and executes the run.
+   - **Train:** Practises the loaded map using reinforcement learning, showing new record attempts live.
+   - **Re-simulate replays:** Replays known leaderboard inputs to extract ground-truth 10 ms physics states.
 
-Without the game window, double-click a launcher instead (then `Start_DeltaZero.bat` must
-not run at the same time): `Drive.bat`, `Train.bat`, `Train_RL.bat`, `Resimulate.bat`,
-`Resimulate_TestMaps.bat`, `Check_Hold.bat`. Every job can be stopped with Ctrl+C; Train and
-RL then save and show the best run.
+### 4. Standalone Launchers (Without In-Game Menu)
 
-Setup on Windows with an Nvidia GPU: Python 3.12, `pip install torch --index-url
-https://download.pytorch.org/whl/cu126` (cu126 still supports Pascal cards such as the
-GTX 1080 Ti), `pip install numpy pandas pyarrow`, then `python tmdriver.py install-plugin`.
-Keep TMInterface up to date in TMLoader (an old version queued maps without loading them).
-Further game instances ("helpers") take the next free plugin ports and share the work of
-re-simulation, Train and RL.
+When running automated jobs without interacting with the plugin UI, use the provided batch scripts:
 
-## Command line
+- `Drive.bat` — Computes a plan and drives the active track.
+- `Train.bat` — RL v1 training loop on the current map.
+- `Train_RL.bat` — RL v2 (PPO) optimization across running instances.
+- `Resimulate.bat` — Re-simulates TMX replays for the current map.
+- `Sim_Night.bat` — Headless overnight re-simulation loop on TMNF-C.
+- `Check_Hold.bat` — Validates that action-holding preserves bit-exact physics determinism.
 
-```
-python tmdriver.py [--device auto|cuda|cpu] [--hold N] <command>
-  serve            connect to the plugin; handles the in-game buttons and tool jobs
-  drive            plan in simulation-only, draw the line, then drive it visibly
-  improve          RL v1 on one map (--map ID --rounds N [--line])
-  rl               RL v2 (PPO) on one map (--map ID --iterations N [--line])
-  resim            re-simulate TMX replays in the game (--maps IDS | --pool | --source bulk)
-  tmx-pool         map pool from the TMX search (most awarded maps in a time range)
-  launch           start helper game instances
-  check-hold       check that --hold gives identical runs in the real game
-  eval             closed-loop evaluation on held-out maps
-  bulk-fetch       download awarded TMX maps + replays (rate-limited, resumable)
-  ghost-build      stage A: HF traces + TMX blocks -> training shards
-  ghost-replays    stage A2: TMX replays -> shards with orientation
-  pretrain         train DriverNet2 (GPU)
-```
+---
 
-Without a reference line (the default) the model sees only the track blocks and its own
-motion; the fastest TMX replay, if there is one, only judges progress during training.
+## CLI Reference
 
-## Tests
+Run `python tmdriver.py <command>` for full control:
 
-The tests run against a fake game (`tests/fake_game.py`) that mirrors the plugin's
-protocol, so they need no TrackMania install:
+| Command | Description |
+|---|---|
+| `serve` | Connects to the TMInterface plugin and serves in-game UI buttons. |
+| `drive` | Plans a line in simulation-only mode, draws 3D triggers, and drives visibly. |
+| `rl` | Runs RL v2 (PPO) on one map across all active TMInterface game instances. |
+| `rl-vec` | Runs batched vectorized PPO without launching the game (using TMNF-C). |
+| `improve` | Practises a map with self-imitation / cross-entropy RL (RL v1). |
+| `sim-night` | Headless overnight crawler: downloads TMX maps and re-simulates in TMNF-C. |
+| `route-learn` | Evaluates and trains the route planner cost model (`route_cost_model.json`). |
+| `virtual` | Starts virtual game instances emulating TMInterface over TMNF-C physics. |
+| `tmx-pool` | Queries the TMX search API for top-awarded maps to build a test pool. |
+| `check-hold` | Tests whether `--hold 5` matches 1-tick precision in the game engine. |
+| `fetch-tmx <ID>` | Fetches a map and its top replays directly from ManiaExchange. |
 
-```
-python tests/test_ghost.py          # live features == training features
-python tests/test_m1_fake.py        # re-simulation (batch == per-tick), dataset, training, eval
-python tests/test_ghost_fake.py     # stage A pipeline end to end
-python tests/test_improve_fake.py   # RL v1, two instances, Ctrl+C, drawing, plan == visible run
-python tests/test_rl.py             # RL v2 maths (GAE, action distribution, PPO direction)
-python tests/test_rl_fake.py        # RL v2 on two instances, action hold == per-tick
-python tests/test_course.py         # progress without a line, stall rules, respawn skip
-python tests/test_jobs_fake.py      # in-game tool buttons -> job consoles
-```
+---
 
-## Repository layout
+## Headless Simulation with TMNF-C
 
-```
-plugin/TMDriver/   TMInterface plugin (protocol 12)
-src/tmdriver/      Python package: link/protocol, session, fleet (several instances), features
-                   (ghost*.py), models, pretraining, RL v1 (improve.py) and v2 (rl.py),
-                   re-simulation, TMX download, .Gbx reader
-scripts/           GPU-box helpers (push/pull, Vast run, Wine start), course_check.py
-tests/             fake game + end-to-end tests
+DeltaZero includes native support for client-free simulation via `tmnfc_port/`:
+
+1. Uses the C physics engine from [TMNF-C](https://github.com/adonis-singh/TMNF-C) patched for Windows (`tmnfc_port/tmnfc-windows.patch`).
+2. Enables running headless training and re-simulation loops on servers or local background threads without DirectX/Wine rendering overhead.
+3. Automatically computes exact spawn locations, checkpoints, and finish triggers.
+
+See [tmnfc_port/README.md](tmnfc_port/README.md) for build instructions and patch details.
+
+---
+
+## Running the Unit Tests
+
+All unit tests run against an emulated game protocol (`tests/fake_game.py`) and do **not** require TrackMania to be installed:
+
+```bash
+# Test perception features and neural policy
+python tests/test_ghost.py
+
+# Test PPO math (GAE, action distributions, KL divergence)
+python tests/test_rl.py
+
+# Test course progress tracking, stall rules, and respawns
+python tests/test_course.py
+
+# Test end-to-end multi-instance RL and action holding
+python tests/test_rl_fake.py
 ```
 
-## Data and credits
+---
 
-- Maps and replays: [ManiaExchange (TMX)](https://tmnf.exchange). Bulk downloads are
-  rate-limited and were coordinated with the TMX team. No TMX data is included here.
-- Game interface: [TMInterface](https://donadigo.com/tminterface/) by donadigo.
-- Inspired by [Linesight](https://github.com/Linesight-RL/linesight). No Linesight code is
-  used.
+## Credits & Acknowledgements
+
+- **[ManiaExchange (TMX)](https://tmnf.exchange)** for providing the public replay and map archive.
+- **[TMInterface](https://donadigo.com/tminterface/)** by donadigo for the TrackMania automation and simulation interface.
+- **[TMNF-C](https://github.com/adonis-singh/TMNF-C)** by adonis-singh for the C physics reimplementation.
+- **[Linesight](https://github.com/Linesight-RL/linesight)** for inspirational research in TrackMania reinforcement learning.

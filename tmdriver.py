@@ -1,4 +1,4 @@
-"""TMDriverAI command line.
+"""DeltaZero command line.
 
     python tmdriver.py install-plugin   copy plugin/TMDriver into Documents/TMInterface/Plugins
     python tmdriver.py serve            connect to the plugin and handle its buttons
@@ -52,7 +52,8 @@ def serve(args):
         named = {'best': runs / 'm1' / 'driver.pt', 'last': runs / 'm1' / 'driver_last.pt',
                  'ghost': runs / 'ghost' / 'best.pt', 'ghost-latest': runs / 'ghost' / 'latest.pt',
                  'ghost-ft': runs / 'ghost_ft' / 'best.pt', 'ghost-big': runs / 'ghost_big' / 'best.pt',
-                 'ghost-big2': runs / 'ghost_big2' / 'best.pt'}
+                 'ghost-big2': runs / 'ghost_big2' / 'best.pt',
+                 'ghost-resim': runs / 'ghost_resim' / 'best.pt'}
         ckpt = named.get(args.model, Path(args.model))
         if not ckpt.exists():
             sys.exit(f'model not found: {ckpt}')

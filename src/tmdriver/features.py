@@ -1,7 +1,7 @@
 """Model inputs. ONE implementation for training (re-simulated replays) and live driving.
 
 Everything is expressed in the car frame, so a left-hander looks the same on every map
-and in every direction. The frame is measured, not assumed (2026-09-24, cheatoskar's lolsport
+and in every direction. The frame is measured, not assumed (2026-09-24, lolsport
 recording): the plugin sends mat3 rows; column 2 is forward (0.999 alignment with the
 velocity), column 1 is up (0.996), column 0 = up x forward.
 

@@ -2,7 +2,7 @@
 
     python tests/test_m0_fake.py
 
-Runs the workflow cheatoskar will use in the game: self test -> record -> self test (now with
+Runs the in-game workflow: self test -> record -> self test (now with
 a recording) -> AI drive, and checks every number the self test reports.
 """
 import json

@@ -95,7 +95,7 @@ class Context:
 # ---------------------------------------------------------------------- RECORD
 
 class Recorder(Task):
-    """Stores one clean run (race start to finish) that cheatoskar drives himself."""
+    """Stores one clean run (race start to finish) driven manually."""
 
     def __init__(self, link, ctx):
         super().__init__(link, ctx)
@@ -173,7 +173,7 @@ class GhostController:
 
 class Driver(Task):
     """"AI drive (live)": the learned model if one is trained (runs/m1/driver.pt), otherwise
-    pure pursuit on cheatoskar's recording."""
+    pure pursuit on human recording."""
     blocking = True
     STALL_S = 3.0
     MAX_ATTEMPTS = 3
@@ -298,7 +298,7 @@ class SelfTest(Task):
          forward axis of the rotation matrix, and the sign of analog steering;
       2. the same inputs again after rewinding: is the simulation bit-for-bit repeatable?
       3. input replays from the race start, each compared with where the car really went:
-         cheatoskar's own recording of this map (both input alignments), and TMX replays of this
+         manual recording of this map (both input alignments), and TMX replays of this
          map from data/tmx/<uid>/ (every alignment and steer sign). A variant that reaches
          the finish at exactly the recorded time proves recorded inputs can be re-simulated,
          which the whole replay-based training data plan depends on;

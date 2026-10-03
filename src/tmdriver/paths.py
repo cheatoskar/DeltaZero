@@ -9,8 +9,8 @@ LINES = DATA / 'lines'          # recorded runs, one per map uid
 LIVE_MAPS = DATA / 'live_maps'  # block lists sent by the plugin
 CALIBRATION = DATA / 'calibration.json'
 # The driver of every job uses: TMDRIVER_CKPT (serve --model) if set, else ghost_big2 fine-tuned on
-# the exact TMNF-C re-simulations with orientation (runs/ghost_resim, the default since 2026-09-27
-# by cheatoskar's choice), else the big model (runs/ghost_big2), else the replay fine-tune
+# the exact TMNF-C re-simulations with orientation (runs/ghost_resim, the default since 2026-09-27),
+# else the big model (runs/ghost_big2), else the replay fine-tune
 # (runs/ghost_ft), else the first pretrained model (runs/ghost), else the M1 model.
 DRIVER_CKPT = Path(os.environ.get('TMDRIVER_CKPT') or next(
     (p for p in (RUNS / 'ghost_resim' / 'best.pt', RUNS / 'ghost_big2' / 'best.pt', RUNS / 'ghost_ft' / 'best.pt', RUNS / 'ghost' / 'best.pt')

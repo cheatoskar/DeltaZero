@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, List
 
 BASE = 'https://tmnf.exchange'
-UA = 'TMDriverAI-research/0.1 (non-commercial; contact: cheatoskar)'
+UA = 'DeltaZero-research/0.1 (non-commercial)'
 # seconds between requests (one lock for all threads); TMDRIVER_TMX_GAP overrides
 MIN_GAP_S = float(os.environ.get('TMDRIVER_TMX_GAP', '1.0'))
 _last = [0.0]

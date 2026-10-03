@@ -145,7 +145,7 @@ class GameSession:
         self.hold_ticks = int(os.environ.get('TMDRIVER_HOLD', '1') or 1)
         link.strict = True     # one ACTION per STEP, checked (see Link.owed)
         # No "Press any key to continue" / opponent screens between map loads (TMInterface
-        # variable; without it cheatoskar had to press Enter on every map).
+        # variable; without it manual confirmation was required on every map).
         # TMDRIVER_SKIP_LOAD_SCREENS=0 turns it off (suspected of crashing the game under Wine).
         if os.environ.get('TMDRIVER_SKIP_LOAD_SCREENS', '1') != '0':
             link.execute('set skip_map_load_screens true')

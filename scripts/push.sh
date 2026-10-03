@@ -13,7 +13,7 @@ WITH_DATA="${3:-}"
 REMOTE="${REMOTE:-~/TMDriverAI}"
 cd "$(dirname "$0")/.."
 
-FILES=(src tests tmdriver.py scripts plugin )
+FILES=(src tests tmdriver.py scripts plugin)
 for f in "${FILES[@]}"; do [ -e "$f" ] || { echo "missing $f"; exit 1; }; done
 # Windows editors write CRLF; bash on the server then fails with "invalid option name".
 sed -i 's/\r$//' scripts/*.sh

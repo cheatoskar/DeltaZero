@@ -1,7 +1,7 @@
 """Reference line: a recorded run resampled by arc length, plus a pure-pursuit follower.
 
 This is M0 scaffolding: it tests the plugin link end to end without any learning. The
-line comes from a run cheatoskar drives himself (RECORD mode); the follower steers towards a
+line comes from a recorded run (RECORD mode); the follower steers towards a
 point ahead on it and matches the recorded speed there.
 """
 from pathlib import Path

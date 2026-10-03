@@ -133,7 +133,7 @@ PluginInfo@ GetPluginInfo()
     PluginInfo info;
     info.Author = "cheatoskar";
     info.Name = "TMDriver";
-    info.Description = "TMDriverAI: lets a Python driver record, drive and test via a local socket";
+    info.Description = "DeltaZero: TrackMania driving AI bridge";
     info.Version = "0.1";
     return info;
 }

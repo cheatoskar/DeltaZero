@@ -36,7 +36,7 @@ def track_id_for(uid: str) -> Optional[int]:
 
 def reference_positions(uid: str, track_id: Optional[int] = None) -> Optional[tuple]:
     """Positions of the best known run on a map (for the ghost-feature driver's line):
-    fastest exact re-simulated run > fastest TMX replay ghost > cheatoskar's recording."""
+    fastest exact re-simulated run > fastest TMX replay ghost > manual recording."""
     from .resim import RESIM
     if track_id is not None and (RESIM / str(track_id)).exists():
         best = None
@@ -66,7 +66,7 @@ def reference_positions(uid: str, track_id: Optional[int] = None) -> Optional[tu
 
 def reference_line(uid: str, track_id: Optional[int] = None) -> Optional[tuple]:
     """Best available path for a map, and where it came from:
-    fastest exact re-simulated run > fastest TMX replay ghost > cheatoskar's recording."""
+    fastest exact re-simulated run > fastest TMX replay ghost > manual recording."""
     from .resim import RESIM
     if track_id is not None and (RESIM / str(track_id)).exists():
         best = None

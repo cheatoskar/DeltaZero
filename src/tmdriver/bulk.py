@@ -6,7 +6,7 @@ copy that travels to the server) and to TmForever/Tracks/Challenges/TMDriver (th
 the local game loads). Replays go to data/tmx/<track_id>/<ReplayId>.Replay.Gbx.
 
 Per map: 1 replay list + 1 map file + up to N replays. The request rate is set by
---rate (cheatoskar OK'd 3/s for a 1.5 h window on 2026-09-24); nothing here parallelises.
+--rate (default rate limit 3/s); nothing here parallelises.
 The map UID is read from the map file itself, so no extra metadata request is needed.
 """
 import json

@@ -13,7 +13,7 @@
 #    The TMDriverAI TMLoader profile is: program TmForever, mods TMInterface + CoreMod.
 # 2) On the box: bash scripts/wine_setup.sh, then bash scripts/wine_start.sh.
 #    The first start creates the in-game profile "root" (the click in wine_start.sh selects it).
-#    Never copy cheatoskar's own TMNF profiles, pkey.dat or session.dat to rented servers.
+#    Never copy personal TMNF profiles, pkey.dat or session.dat to rented servers.
 set -e
 mkdir -p /root/tmnf
 cat > /root/tmnf/env.sh <<'EOF'
