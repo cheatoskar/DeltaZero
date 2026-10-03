@@ -43,7 +43,14 @@ def map_dirs():
     from .paths import DATA
     dirs = [DATA / 'maps']
     try:
-        from .tmx import tracks_dir
+        from .tmx import tracks_dir, game_dir
+        gd = game_dir()
+        camp = gd / 'Tracks' / 'Campaigns'
+        if camp.exists():
+            dirs.insert(0, camp)
+        chal = gd / 'Tracks' / 'Challenges'
+        if chal.exists():
+            dirs.insert(0, chal)
         dirs.insert(0, tracks_dir())
     except Exception:                       # noqa: BLE001  (no game folder on a server)
         pass

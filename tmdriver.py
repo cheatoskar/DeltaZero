@@ -305,18 +305,21 @@ def improve(args):
     link = _link(args)
     from tmdriver.instances import connect_helpers
     helpers = connect_helpers(args.port) if args.helpers == 'auto' else []
-    run(link, track_id=args.map, rounds=args.rounds, episodes=args.episodes, show=not args.no_show,
+    track_id = int(args.map) if str(args.map or '').isdigit() else None
+    run(link, track_id=track_id, rounds=args.rounds, episodes=args.episodes, show=not args.no_show,
         ckpt=args.model or None, branch=args.branch, seed=args.seed, use_line=args.line, helpers=helpers)
 
 
 def show(args):
     from tmdriver.improve import show_best
-    show_best(_link(args), track_id=args.map, speed=args.speed)
+    track_id = int(args.map) if str(args.map or '').isdigit() else None
+    show_best(_link(args), track_id=track_id, speed=args.speed)
 
 
 def drive(args):
     from tmdriver.improve import drive_preview
-    drive_preview(_link(args), track_id=args.map, speed=args.speed, ckpt=args.model or None, plans=args.plans,
+    track_id = int(args.map) if str(args.map or '').isdigit() else None
+    drive_preview(_link(args), track_id=track_id, speed=args.speed, ckpt=args.model or None, plans=args.plans,
                   use_line=args.line)
 
 
@@ -432,7 +435,7 @@ def main():
     pt.add_argument('--seed', type=int, default=0, help='data order (use another one when continuing with --init)')
     pt.set_defaults(fn=pretrain)
     im = sub.add_parser('improve', help='the model practises one map and gets faster (serve must NOT run)')
-    im.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
+    im.add_argument('--map', default=None, help='TMX id or map UID (default: the map open in the game)')
     im.add_argument('--rounds', type=int, default=20)
     im.add_argument('--episodes', type=int, default=6, help='sampled runs per round (+1 greedy)')
     im.add_argument('--model', default='', help='checkpoint (default: as serve)')
@@ -445,12 +448,12 @@ def main():
     im.add_argument('--port', type=int, default=P.PORT)
     im.set_defaults(fn=improve)
     sh = sub.add_parser('show', help='play the best run that improve found on this map')
-    sh.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
+    sh.add_argument('--map', default=None, help='TMX id or map UID (default: the map open in the game)')
     sh.add_argument('--speed', type=float, default=1.0)
     sh.add_argument('--port', type=int, default=P.PORT)
     sh.set_defaults(fn=show)
     dv = sub.add_parser('drive', help='plan the line (drawn in the game), then drive it (serve must NOT run)')
-    dv.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
+    dv.add_argument('--map', default=None, help='TMX id or map UID (default: the map open in the game)')
     dv.add_argument('--speed', type=float, default=1.0)
     dv.add_argument('--plans', type=int, default=12, help='planned runs (1 greedy + sampled); the best is driven')
     dv.add_argument('--model', default='')
@@ -458,7 +461,7 @@ def main():
     dv.add_argument('--port', type=int, default=P.PORT)
     dv.set_defaults(fn=drive)
     rp = sub.add_parser('rl', help='RL v2 (PPO) on one map, over every running instance (serve must NOT run)')
-    rp.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
+    rp.add_argument('--map', default=None, help='TMX id or map UID (default: the map open in the game)')
     rp.add_argument('--iterations', type=int, default=30)
     rp.add_argument('--runs', type=int, default=8, help='sampled runs per iteration (+1 greedy, + branch runs)')
     rp.add_argument('--branch', type=int, default=4, help='runs that start before where the best run got stuck')
@@ -473,7 +476,7 @@ def main():
     rp.add_argument('--port', type=int, default=P.PORT)
     rp.set_defaults(fn=rl)
     ch = sub.add_parser('check-hold', help='real-game check that --hold 5 gives the same runs (serve must NOT run)')
-    ch.add_argument('--map', type=int, default=None, help='TMX id (default: the map open in the game)')
+    ch.add_argument('--map', default=None, help='TMX id or map UID (default: the map open in the game)')
     ch.add_argument('--port', type=int, default=P.PORT)
     ch.set_defaults(fn=check_hold)
     ni = sub.add_parser('night', help='overnight: fetch top TMX maps + replays while re-simulating (serve must NOT run)')
@@ -494,7 +497,7 @@ def main():
     rl2.add_argument('--trials', type=int, default=24)
     rl2.set_defaults(fn=route_learn)
     rv = sub.add_parser('rl-vec', help='RL v2 without the game, batched: N cars in one TMNF-C world')
-    rv.add_argument('--map', type=int, default=None, help='TMX id')
+    rv.add_argument('--map', default=None, help='TMX id or map UID')
     rv.add_argument('--map-file', default='')
     rv.add_argument('--iterations', type=int, default=50)
     rv.add_argument('--runs', type=int, default=64, help='sampled runs per iteration (+1 greedy)')
@@ -536,7 +539,17 @@ def main():
     gr.add_argument('--rebuild', action='store_true')
     gr.add_argument('--source', default='bulk', help="bulk (replay_shards) | resim_c | resim_npz | trainpack (sim-night's exact runs -> resim_shards)")
     gr.set_defaults(fn=ghost_replays)
-    args = ap.parse_args()
+    try:
+        args = ap.parse_args()
+    except SystemExit:
+        done = os.environ.get('TMDRIVER_JOB_DONE_FILE')
+        if done:
+            try:
+                Path(done).touch()
+                input('\nArguments error (see above). Press Enter to close this window.')
+            except Exception:
+                pass
+        raise
     os.environ['TMDRIVER_DEVICE'] = args.device
     if args.hold > 1:
         os.environ['TMDRIVER_HOLD'] = str(args.hold)
