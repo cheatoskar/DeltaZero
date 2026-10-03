@@ -599,15 +599,25 @@ def planned_route(uid: str, track_id: Optional[int], log=print):
 
 def reference_setup(uid: str, track_id: Optional[int], use_line: bool, log=print):
     """-> (line for the model or None, judge run or None, text for the log)."""
-    ref = reference(uid, track_id, log)
+    route_mode = os.environ.get('TMDRIVER_ROUTE', 'auto')
+    if route_mode == 'none':
+        return None, None, 'OFF (pure geometry: track cells + checkpoints, zero ghosts)'
+
+    if route_mode == 'plan':
+        ref = planned_route(uid, track_id, log)
+    elif use_line:
+        ref = reference(uid, track_id, log)
+    else:
+        # Line is OFF: do NOT fetch human TMX ghosts. Use planned geometric centerline if available.
+        ref = planned_route(uid, track_id, log=lambda *a: None)
+
     if use_line and ref is None:
-        log('WARNING: line requested, but there is no reference run for this map (not on TMX, '
-            'or no replay without respawns): driving WITHOUT the line')
+        log('WARNING: line requested, but no reference route available: driving WITHOUT the line')
     if use_line and ref is not None:
         return ref[0], None, f'ON ({ref[1]})'
     if ref is not None:
         return None, ref[0], f'OFF (blocks only; progress judged along {ref[1]}, the model does not see it)'
-    return None, None, 'OFF (blocks only; progress = track cells + checkpoints, no reference run known)'
+    return None, None, 'OFF (blocks only; progress = track cells + checkpoints, zero ghosts)'
 
 
 def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: int = 6, elite_k: int = 3,

@@ -43,8 +43,9 @@ class JobRequest(Exception):
                     cars = 32
                 expl_mode = (self.flags >> 6) & 0x03
                 eval_temp = '0.5' if expl_mode == 0 else ('0.85' if expl_mode == 2 else '0.7')
+                branch = ['--branch', '16']
                 return cmd + ['rl-vec', '--iterations', str(max(1, self.rounds)), '--cars', str(cars),
-                              '--eval-temp', eval_temp] + map_args + line
+                              '--eval-temp', eval_temp] + branch + map_args + line
             return cmd + ['improve', '--rounds', str(max(1, self.rounds))] + m + line + \
                 ([] if self.flags & P.JOB_SHOW_BEST else ['--no-show'])
         if self.job == P.JOB_RESIM:

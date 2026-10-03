@@ -20,9 +20,35 @@ import torch
 from . import protocol as P
 from .fleet import policy_view
 from .ghost_policy import GhostPolicy, forward_many
-from .improve import ImproveEpisode, reference_setup, run_text, score, tmi_script
+from .improve import ImproveEpisode, branch_point, reference_setup, run_text, score, tmi_script
 from .paths import DRIVER_CKPT, safe, tmi_scripts_dir, torch_device
 from .rl import OUT, Batch, Critic, episode_steps, ppo_update
+
+
+class VecBranchEpisode(ImproveEpisode):
+    """Starts mid-run at branch_t from a captured snapshot, carrying parent decisions and ticks."""
+
+    def __init__(self, policy: GhostPolicy, limit_ms: int, temp: float, seed: int,
+                 parent: dict, branch_t: int, start_snap, pol_snap):
+        super().__init__(policy, limit_ms, temp, seed)
+        self.parent = parent
+        self.branch_t = branch_t
+        self.start_snap = start_snap
+        self.pol_snap = pol_snap
+
+    def begin(self, start):
+        super().begin(start)
+        self.policy.restore(self.pol_snap)
+        bt = self.branch_t
+        self.ticks = [x for x in self.parent['ticks'] if x[0] < bt]
+        self.decisions = [d for d in self.parent['decisions'] if d[4] < bt]
+        self.path = list(self.parent['path'][:bt // 100])
+        self.best, self.best_t, self.last_t = self.policy.progress_m, bt, bt
+
+    def result(self):
+        r = super().result()
+        r['branch_t'] = self.branch_t
+        return r
 
 
 def make_step(sim, i: int, rt: int, race: dict) -> P.Step:
@@ -61,14 +87,24 @@ class Runner:
         pending = [(0, 0, 0)] * n
 
         def start(i, now: bool):
-            """Next episode on car i, back at the start (the world is at race time 10 there, the
-            car has not moved yet). It answers the STEP at race time 0 (its first action,
-            pending); with now=True (mid-tick) also the identical STEP at 10, and returns that
-            action for this tick, so the car steps along with the others."""
+            """Next episode on car i. If ep has start_snap, restores state and starts from branch_t;
+            otherwise resets to the start line (race time 0)."""
             while queue:
                 e = queue.pop(0)
-                sim.reset([i])
                 ep = episodes[e]
+                snap = getattr(ep, 'start_snap', None)
+                if snap is not None:
+                    raw_sim, branch_t, a_pending = snap
+                    sim.restore(i, raw_sim)
+                    ep.begin(None)
+                    car_ep[i], rt[i], pending[i] = e, branch_t + 10, a_pending
+                    a1 = self._answer(ep, make_step(sim, i, branch_t + 10, sim.race(i))) if now else None
+                    if a1 is None and now:
+                        results[e] = ep.result()
+                        continue
+                    return a1 if now else None
+
+                sim.reset([i])
                 ep.begin(None)
                 a0 = self._answer(ep, make_step(sim, i, 0, sim.race(i)))
                 a1 = a0 if a0 is None or not now else self._answer(ep, make_step(sim, i, 10, sim.race(i)))
@@ -127,7 +163,7 @@ class Runner:
 def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int = 50, runs: int = 64,
                  cars: int = 32, use_line: bool = False, ckpt: Path = None, lr: float = 1e-5,
                  critic_lr: float = 1e-3, warmup: int = 2, kl_coef: float = 0.1, ent_coef: float = 0.01,
-                 kl_max: float = 0.15, eval_temp: float = 0.7, seed: Optional[int] = None, log=print):
+                 kl_max: float = 0.15, eval_temp: float = 0.7, branch: int = 16, seed: Optional[int] = None, log=print):
     from .replaybuild import map_blocks
     from .tmnfc_sim import CarSim
     from .virtual_game import tmi_waypoint
@@ -157,8 +193,7 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
         f" ({'full race layer' if sim.full_route else 'start-only route'}), model {ckpt}")
     log(f'reference line: {line_txt}')
     best, history = None, []
-    # guard against PPO collapse (seen 2026-09-26: 57/65 finished at iteration 21, 0/65 at 38 with
-    # entropy and KL to the start model rising): keep the best policy, and roll back to it with a
+    # guard against PPO collapse: keep the best policy, and roll back to it with a
     # halved learning rate when the finish rate halves or the policy drifts too far
     best_policy, best_rate = None, -1.0
 
@@ -181,29 +216,60 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
         for it in range(iterations):
             t0 = time.perf_counter()
             model.eval()
-            # the evaluation run: temperature eval_temp with a fixed seed, not argmax. Measured 2026-09-27 on
-            # lolsport: argmax (and 0.3) never finishes, 0.7 finished 12/12 with the RL model (the policy
-            # dithers between steer bins every 50 ms as a stand-in for analog steering)
+
+            # Checkpoint Curriculum / Branching setup:
+            branch_snap = None
+            bt = None
+            if it >= 1 and best is not None and branch > 0 and len(best.get('ticks', [])) > 50:
+                rng = np.random.default_rng(seed + it * 777)
+                bt = branch_point(best, rng)
+                if bt is not None and bt >= 1000:
+                    sim.reset([0])
+                    policy.restart()
+                    by_t = {t: (s, g, b) for t, s, g, b in best['ticks']}
+                    for t_ in range(0, bt, 10):
+                        st_ = make_step(sim, 0, t_, sim.race(0))
+                        policy.observe(st_)
+                        act = by_t.get(t_, (0, 1, 1))
+                        sim.step([act] + [(0, 0, 0)] * (sim.n - 1))
+                    st_bt = make_step(sim, 0, bt, sim.race(0))
+                    policy.observe(st_bt)
+                    snap_sim = sim.capture(0)
+                    snap_pol = policy.snapshot()
+                    branch_snap = (snap_sim, snap_pol, bt, by_t.get(bt, (0, 1, 1)))
+                    sim.reset([0])
+                    policy.restart()
+
             # Multi-temperature fleet schedule:
-            # 1 evaluation run at eval_temp with a fixed seed.
-            # Sampled runs scheduled smoothly from exploitation (0.35) to exploration (0.85):
-            # - Lower temp runs (0.35-0.45) reliably finish and establish strong baseline lap times.
-            # - Mid temp runs (0.50-0.70) refine cornering, drifts, and braking points.
-            # - High temp runs (0.75-0.85) explore aggressive cuts and alternative paths.
             eps = [ImproveEpisode(policy_view(policy), limit, eval_temp, 12345)]
             t_min = max(0.25, round(eval_temp - 0.35, 2))
             t_max = min(0.98, round(eval_temp + 0.20, 2))
-            for idx in range(runs):
+
+            n_branch = min(branch, runs // 2) if branch_snap is not None else 0
+            n_full = runs - n_branch
+
+            for idx in range(n_full):
                 seed += 1
-                frac = idx / max(1, runs - 1)
+                frac = idx / max(1, n_full - 1) if n_full > 1 else 0.5
                 temp = round(t_min + (t_max - t_min) * frac, 3)
                 eps.append(ImproveEpisode(policy_view(policy), limit, temp, seed))
+
+            if branch_snap is not None:
+                snap_sim, snap_pol, bt, a_pending = branch_snap
+                for idx in range(n_branch):
+                    seed += 1
+                    frac = idx / max(1, n_branch - 1) if n_branch > 1 else 0.5
+                    temp = round(t_min + (t_max - t_min) * frac, 3)
+                    eps.append(VecBranchEpisode(policy_view(policy), limit, temp, seed,
+                                                best, bt, (snap_sim, bt, a_pending), snap_pol))
+
             res = runner.run(eps)
             t_roll = time.perf_counter() - t0
             evaluation = res[0]
             decisions, rewards, dones = [], [], []
             for r in res:
-                st_ = episode_steps(r)
+                start_t = r.get('branch_t') or 0
+                st_ = episode_steps(r, start_t=start_t)
                 if st_ is None:
                     continue
                 dec, rew = st_
@@ -232,6 +298,7 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
                     gr['lr'] *= 0.5
                 rolled = True
             ticks = sum(len(r['ticks']) for r in res)
+            branch_info = f", branching {n_branch} cars from {bt / 1000:.1f}s" if n_branch > 0 else ""
             rec = {'iteration': it + 1, 'eval': run_text(evaluation), 'finished': f'{len(fin)}/{len(res)}',
                    'best': run_text(best), 'best_ms': best['time_ms'], 'decisions': len(decisions),
                    'median_finish_ms': int(np.median(fin)) if fin else None,
@@ -240,7 +307,7 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
             history.append(rec)
             with open(out_dir / 'progress.jsonl', 'a', encoding='utf-8') as f:
                 f.write(json.dumps(dict(rec, time=time.strftime('%H:%M:%S'))) + '\n')
-            log(f"iteration {it + 1}: eval {rec['eval']}, {rec['finished']} finished"
+            log(f"iteration {it + 1}: eval {rec['eval']}, {rec['finished']} finished{branch_info}"
                 f"{', median ' + str(rec['median_finish_ms'] / 1000) + 's' if fin else ''}, best {rec['best']}"
                 f"{' (new)' if improved else ''}, {rec['ticks_per_s']} ticks/s, "
                 + (f"kl {stats.get('kl_ref')}, " if stats and not rec['critic_only'] else 'critic warm-up, ')

@@ -237,9 +237,11 @@ def rl_vec(args):
     if f is None:
         sys.exit(f'no map file for {args.map} (open a map in the game or provide --map <ID>)')
     track_id = int(args.map) if str(args.map or '').isdigit() else 0
+    if getattr(args, 'route', 'auto') != 'auto':
+        os.environ['TMDRIVER_ROUTE'] = args.route
     rl_vec_train(f, track_id=track_id, iterations=args.iterations, runs=args.runs, cars=args.cars,
                  use_line=args.line, ckpt=args.model or None, lr=args.lr, warmup=args.warmup, kl_coef=args.kl,
-                 eval_temp=args.eval_temp, seed=args.seed)
+                 eval_temp=args.eval_temp, branch=args.branch, seed=args.seed)
 
 
 def tmx_pool(args):
@@ -355,6 +357,8 @@ def main():
                          'not yet verified in the real game)')
     ap.add_argument('--no-draw', action='store_true',
                     help='turn off rendering in the game(s) while this command runs (TMInterface draw_game)')
+    ap.add_argument('--route', choices=['auto', 'plan', 'none'], default='auto',
+                    help='auto (TMX if exists, else geometry) | plan (pure geometry Dijkstra) | none (pure blocks, zero ghosts)')
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('install-plugin').set_defaults(fn=install_plugin)
     s = sub.add_parser('serve')
@@ -503,6 +507,9 @@ def main():
     rv.add_argument('--runs', type=int, default=64, help='sampled runs per iteration (+1 greedy)')
     rv.add_argument('--cars', type=int, default=32, help='cars driving at once')
     rv.add_argument('--line', action='store_true')
+    rv.add_argument('--branch', type=int, default=16, help='cars to branch from bottleneck (0 = disable branching)')
+    rv.add_argument('--route', choices=['auto', 'plan', 'none'], default='auto',
+                    help='route guidance mode: auto = planned/TMX, plan = map geometry Dijkstra, none = pure blocks')
     rv.add_argument('--lr', type=float, default=1e-5)
     rv.add_argument('--warmup', type=int, default=2)
     rv.add_argument('--kl', type=float, default=0.1)
@@ -555,6 +562,8 @@ def main():
         os.environ['TMDRIVER_HOLD'] = str(args.hold)
     if args.no_draw:
         os.environ['TMDRIVER_DRAW_GAME'] = '0'
+    if args.route != 'auto':
+        os.environ['TMDRIVER_ROUTE'] = args.route
     done = os.environ.get('TMDRIVER_JOB_DONE_FILE')
     if not done and args.cmd in GAME_COMMANDS and serve_running():
         sys.exit('Start_DeltaZero.bat (serve) is running: it would take the game connection away from '
