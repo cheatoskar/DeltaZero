@@ -195,7 +195,7 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
     best, history = None, []
     # guard against PPO collapse: keep the best policy, and roll back to it with a
     # halved learning rate when the finish rate halves or the policy drifts too far
-    best_policy, best_rate = None, -1.0
+    best_policy, best_score, best_rate = None, -1.0, -1.0
 
     def save(best_now):
         torch.save(dict(torch.load(ckpt, map_location='cpu', weights_only=False), state_dict=model.state_dict(),
@@ -287,15 +287,20 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
             fin = [r['time_ms'] for r in res if r['finished']]
             rate = len(fin) / max(len(res), 1) - (float(np.median(fin)) / 1e6 if fin else 0.0)
             rolled = False
-            if rate > best_rate:
-                best_rate = rate
+            cur_score = score(best) if best is not None else -1.0
+            if improved or cur_score > best_score or rate > best_rate:
+                if cur_score > best_score:
+                    best_score = cur_score
+                if rate > best_rate:
+                    best_rate = rate
                 best_policy = {k: v.detach().clone() for k, v in model.state_dict().items()}
                 torch.save(dict(torch.load(ckpt, map_location='cpu', weights_only=False),
                                 state_dict=model.state_dict(), rl_on=uid), out_dir / 'model_best.pt')
-            elif best_policy is not None and it >= warmup and not improved and (rate < 0.25 * best_rate or stats.get('kl_ref', 0) > kl_max):
+            elif best_policy is not None and it >= warmup and not improved and \
+                 ((best_rate > 0 and rate < 0.25 * best_rate) or (stats.get('kl_ref', 0) > kl_max and opt.param_groups[0]['lr'] > 2e-6)):
                 model.load_state_dict(best_policy)
                 for gr in opt.param_groups:
-                    gr['lr'] *= 0.5
+                    gr['lr'] = max(1e-6, gr['lr'] * 0.5)
                 rolled = True
             ticks = sum(len(r['ticks']) for r in res)
             branch_info = f", branching {n_branch} cars from {bt / 1000:.1f}s" if n_branch > 0 else ""
