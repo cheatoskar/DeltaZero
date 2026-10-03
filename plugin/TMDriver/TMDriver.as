@@ -80,8 +80,10 @@ int jobRounds = 20;
 float jobHours = 3.0f;
 bool jobGpu = true;
 bool jobPerTick = false;
-bool jobLine = false;     // give the AI the reference line (fastest TMX replay)
-bool jobShowBest = true;  // Train: show every new best run in the game
+bool jobLine = true;      // give the AI the reference line (fastest TMX replay or Route Planner)
+bool jobShowBest = true;   // Train: show every new best run in the game
+bool jobTmnfc = true;      // Fast TMNF-C Batched RL on GPU
+bool jobRoute = false;     // Force Route Planner from geometry
 
 // Requests made outside a physics step are applied at the start of the next OnRunStep.
 bool pendingRestart = false;
@@ -211,7 +213,8 @@ void WriteStr(const string&in s)
 void SendJob(int job)
 {
     if (client is null) return;
-    int flags = (jobGpu ? 1 : 0) | (jobPerTick ? 2 : 0) | (jobLine ? 4 : 0) | (jobShowBest ? 8 : 0);
+    int flags = (jobGpu ? 1 : 0) | (jobPerTick ? 2 : 0) | (jobLine ? 4 : 0) | (jobShowBest ? 8 : 0)
+              | (jobTmnfc ? 16 : 0) | (jobRoute ? 32 : 0);
     client.Write(P_JOB);
     client.Write(job);
     client.Write(jobMap);
@@ -757,27 +760,25 @@ void Render()
             "Documents\\TmForever or Documents\\TrackMania, whichever was used last. To set it, type in the "
             "TMI console: set tmdriver_game_folder C:\\Users\\<you>\\Documents\\TrackMania");
         jobGpu = UI::Checkbox("Use GPU (CUDA)", jobGpu);
-        Tip("Off = CPU. The laptop has no CUDA GPU.");
-        jobLine = UI::Checkbox("Use reference line (TMX replay)", jobLine);
-        Tip("On: the AI sees the line of the fastest TMX replay of this map (downloaded if needed) "
-            "and follows it. Off: it drives from the blocks alone; progress then counts the track "
-            "blocks reached and the checkpoints.");
+        Tip("Off = CPU. CUDA accelerates inference and batch RL.");
+        jobLine = UI::Checkbox("Use reference line / route", jobLine);
+        Tip("On: the AI follows a reference line (TMX replay or TMNF-C Route Planner). Highly recommended! Off: blocks only.");
+        jobRoute = UI::Checkbox("Force Route Planner (TMNF-C)", jobRoute);
+        Tip("Compute 2.5D geometric route from track blocks using TMNF-C Dijkstra instead of human replays.");
+        jobTmnfc = UI::Checkbox("Fast Training: TMNF-C Batch RL on GPU", jobTmnfc);
+        Tip("When clicking Train: runs 32 cars simultaneously in TMNF-C on GPU (100x faster than game window simulation).");
         UI::BeginDisabled(client is null || mode != MODE_IDLE);
         if (UI::Button("Drive")) SendJob(JOB_DRIVE);
-        Tip("The AI drives the map once without rendering (the game freezes briefly), draws its "
-            "line as small boxes, then drives it visibly.");
+        Tip("The AI drives the map in simulation, draws its line as small boxes, then drives it visibly.");
         UI::SameLine();
         if (UI::Button("Show best run")) SendJob(JOB_SHOW);
-        Tip("Plays the best run that 'Train' found on this map.");
-        jobRounds = UI::SliderInt("Rounds", jobRounds, 1, 200);
-        Tip("Training rounds. Each round: 7 runs (1 normal + 6 with random variations), then the AI "
-            "learns from the best ones. The game stays frozen while it trains.");
+        Tip("Plays the best run (from Train or TMNF-C RL) visibly in the game.");
+        jobRounds = UI::SliderInt("Iterations / Rounds", jobRounds, 1, 200);
+        Tip("Training iterations. With TMNF-C: iterations of 32-car batched PPO. In-game: simulation rounds.");
         jobShowBest = UI::Checkbox("Show new best runs", jobShowBest);
-        Tip("Train: after a round with a new best run, drive it visibly in the game. Respawn while it "
-            "is shown skips it and the next round starts at once.");
-        if (UI::Button("Train")) SendJob(JOB_TRAIN);
-        Tip("The AI practises this map and gets faster. Every new best run is shown in the game, "
-            "then training continues.");
+        Tip("Train: after training, drive the best run visibly in the game.");
+        if (UI::Button(jobTmnfc ? "Train (TMNF-C Fast)" : "Train (In-Game)")) SendJob(JOB_TRAIN);
+        Tip(jobTmnfc ? "Train the map with 32 cars in parallel on the GPU using TMNF-C." : "The AI practises this map in the game.");
         UI::EndDisabled();
         UI::SameLine();
         UI::BeginDisabled(client is null);

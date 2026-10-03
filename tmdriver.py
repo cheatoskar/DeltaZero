@@ -184,15 +184,60 @@ def rl_vec(args):
     from tmdriver.rl_vec import rl_vec_train
     from tmdriver.virtual_game import map_dirs
     f = Path(args.map_file) if args.map_file else None
+    map_str = str(args.map or '')
+    if f is None and map_str and map_str != '0':
+        for d in map_dirs():
+            base = Path(d)
+            search_dirs = [base]
+            if base.parent.name == 'Tracks' or base.name == 'TMDriver':
+                search_dirs.append(base.parent)
+            for sd in search_dirs:
+                if not sd.exists():
+                    continue
+                hits = sorted(sd.glob(f'*_{map_str}.Challenge.Gbx'))
+                if hits:
+                    f = hits[0]
+                    break
+                for cand in sd.glob('**/*.Challenge.Gbx'):
+                    try:
+                        if map_str.encode() in cand.read_bytes()[:2048]:
+                            f = cand
+                            break
+                    except Exception:
+                        continue
+                if f is not None:
+                    break
+            if f is not None:
+                break
+    if f is None and map_str and map_str.isdigit() and int(map_str) > 0:
+        try:
+            from tmdriver import tmx
+            from tmdriver.paths import TMX, safe
+            print(f'Fetching map {map_str} from TMX ...')
+            res = tmx.fetch(int(map_str), 1, TMX, safe)
+            f = res.get('map')
+        except Exception:
+            pass
     if f is None:
         for d in map_dirs():
-            hits = sorted(Path(d).glob(f'*_{args.map}.Challenge.Gbx'))
-            if hits:
-                f = hits[0]
+            base = Path(d)
+            search_dirs = [base]
+            if base.parent.name == 'Tracks' or base.name == 'TMDriver':
+                search_dirs.append(base.parent)
+            for sd in search_dirs:
+                if not sd.exists():
+                    continue
+                all_maps = sorted(sd.glob('**/*.Challenge.Gbx'), key=lambda p: p.stat().st_mtime, reverse=True)
+                if all_maps:
+                    f = all_maps[0]
+                    print(f'Using active map from disk: {f.name}')
+                    break
+            if f is not None:
                 break
     if f is None:
-        sys.exit(f'no map file for {args.map} (download it first, e.g. with sim-night or rl --map)')
-    rl_vec_train(f, track_id=args.map, iterations=args.iterations, runs=args.runs, cars=args.cars,
+        sys.exit(f'no map file for {args.map} (open a map in the game or provide --map <ID>)')
+    track_id = int(args.map) if str(args.map or '').isdigit() else 0
+    rl_vec_train(f, track_id=track_id, iterations=args.iterations, runs=args.runs, cars=args.cars,
                  use_line=args.line, ckpt=args.model or None, lr=args.lr, warmup=args.warmup, kl_coef=args.kl,
                  eval_temp=args.eval_temp, seed=args.seed)
 

@@ -36,7 +36,11 @@ class JobRequest(Exception):
         if self.job == P.JOB_DRIVE:
             return cmd + ['drive'] + m + line
         if self.job == P.JOB_TRAIN:
-            return cmd + ['improve', '--rounds', str(max(1, self.rounds))] + m + line +                 ([] if self.flags & P.JOB_SHOW_BEST else ['--no-show'])
+            if self.flags & P.JOB_TMNFC:
+                map_args = m if m else (['--map', getattr(self, 'map_uid', '')] if getattr(self, 'map_uid', '') else [])
+                return cmd + ['rl-vec', '--iterations', str(max(1, self.rounds)), '--cars', '32'] + map_args + line
+            return cmd + ['improve', '--rounds', str(max(1, self.rounds))] + m + line + \
+                ([] if self.flags & P.JOB_SHOW_BEST else ['--no-show'])
         if self.job == P.JOB_RESIM:
             return cmd + ['resim', '--source', 'bulk', '--replays', '5', '--hours', str(self.hours),
                           '--map', str(max(self.track_id, 0))] + \
@@ -51,9 +55,11 @@ class JobRequest(Exception):
 def spawn_job(req: JobRequest, done_file: Path):
     """Start the job in a new console window (Windows) with live output. It touches
     done_file when it has finished (its window stays open until Enter)."""
-    env = dict(os.environ, TMDRIVER_JOB_DONE_FILE=str(done_file), TMDRIVER_JOB_TITLE=f'TMDriver - {req}')
+    env = dict(os.environ, TMDRIVER_JOB_DONE_FILE=str(done_file), TMDRIVER_JOB_TITLE=f'DeltaZero - {req}')
     if req.game_dir:
         env['TMDRIVER_GAME_DIR'] = req.game_dir      # the TMI variable tmdriver_game_folder
+    if req.flags & P.JOB_ROUTE:
+        env['TMDRIVER_ROUTE'] = 'plan'
     flags = subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
     return subprocess.Popen(req.command(), cwd=str(ROOT), env=env, creationflags=flags)
 
@@ -110,7 +116,11 @@ class Server:
                 link.flush()
 
         elif kind == P.P_JOB:
-            raise JobRequest(*payload)
+            req = JobRequest(*payload)
+            if self.ctx.map:
+                req.map_uid = self.ctx.map.uid
+                req.map_name = self.ctx.map.name
+            raise req
 
         elif kind == P.P_BENCH:
             if self.task is not None:

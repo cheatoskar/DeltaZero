@@ -469,6 +469,25 @@ def map_file_for(uid: str, track_id: Optional[int], log=print) -> Optional[str]:
             return tmx.fetch(tid, 0, TMX, safe, log=lambda *a: None)['map'].name
     except Exception as e:
         log(f'  TMX: {e}')
+    # If not on TMX or offline: search local tracks_dir for the map file containing this uid
+    try:
+        from .virtual_game import map_dirs
+        for md in map_dirs():
+            base = Path(md)
+            search_dirs = [base]
+            if base.parent.name == 'Tracks' or base.name == 'TMDriver':
+                search_dirs.append(base.parent)  # Tracks/Challenges
+            for d in search_dirs:
+                if not d.exists():
+                    continue
+                for f in d.glob('**/*.Challenge.Gbx'):
+                    try:
+                        if uid.encode() in f.read_bytes()[:2048]:
+                            return str(f.resolve())
+                    except Exception:
+                        continue
+    except Exception as e:
+        log(f'  local map search: {e}')
     return None
 
 
@@ -532,8 +551,13 @@ def planned_route(uid: str, track_id: Optional[int], log=print):
         from .route_planner import plan
         name = map_file_for(uid, track_id, log)
         if not name:
+            log(f'  route planner: no map file found for uid {uid[:12]}')
             return None
-        path = tmx.tracks_dir() / name
+        p = Path(name)
+        path = p if p.is_absolute() and p.exists() else tmx.tracks_dir() / name
+        if not path.exists():
+            log(f'  route planner: {path} not found')
+            return None
         log(f'planning a route from the map geometry ({path.name}) ...')
         route = plan(path, f'plan_{safe(uid)}', log=log)
         if route is None:
@@ -700,18 +724,35 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
 
 
 def show_best(link, track_id: Optional[int] = None, speed: float = 1.0, log=print):
-    """Play the best run that `improve` found on this map (runs/improve/<uid>/best_run.json)."""
+    """Play the best run that `improve` or `rl-vec` found on this map."""
     sess = GameSession(link, log)
     open_map(sess, track_id, 0, log)
-    f = OUT / safe(sess.map.uid) / 'best_run.json'
-    if not f.exists():
+    f_imp = OUT / safe(sess.map.uid) / 'best_run.json'
+    f_rl = RUNS / 'rl' / safe(sess.map.uid) / 'best_run.json'
+    f = None
+    if f_rl.exists() and f_imp.exists():
+        try:
+            r_rl = json.loads(f_rl.read_text(encoding='utf-8'))
+            r_imp = json.loads(f_imp.read_text(encoding='utf-8'))
+            t_rl = r_rl.get('time_ms') or 99999999
+            t_imp = r_imp.get('time_ms') or 99999999
+            f = f_rl if t_rl <= t_imp else f_imp
+        except Exception:
+            f = f_rl if f_rl.exists() else f_imp
+    elif f_rl.exists():
+        f = f_rl
+    elif f_imp.exists():
+        f = f_imp
+
+    if not f or not f.exists():
         sess.status('No best run for this map yet: press "Train" first.')
-        raise SystemExit(f'no best run for {sess.map.name!r} yet ({f}); train on the map first')
+        raise SystemExit(f'no best run for {sess.map.name!r} yet; train on the map first')
     run = json.loads(f.read_text(encoding='utf-8'))
-    txt = f"{run['time_ms'] / 1000:.2f}s" if run['time_ms'] else f"{run['progress_m']:.0f} m"
-    log(f"best run on {run['map']!r}: {txt} (round {run['round']}, line {run.get('line', '?')})")
+    txt = f"{run['time_ms'] / 1000:.2f}s" if run.get('time_ms') else f"{run.get('progress_m', 0):.0f} m"
+    src_tag = 'TMNF-C RL' if f == f_rl else 'improve'
+    log(f"best run on {run['map']!r}: {txt} ({src_tag}, line {run.get('line', '?')})")
     sess.ensure_drivable()
-    sess.status(f'Best run ({txt}): showing it')
+    sess.status(f'Best run ({txt}, {src_tag}): showing it')
     link.speed(speed)
     shown = sess.run([Playback([tuple(t) for t in run['ticks']])], sim_only=False)[0]
     sess.status(f'Best run shown ({txt}).' if not shown['aborted'] else 'Best run: stopped (respawn).')
