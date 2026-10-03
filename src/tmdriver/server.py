@@ -38,7 +38,13 @@ class JobRequest(Exception):
         if self.job == P.JOB_TRAIN:
             if self.flags & P.JOB_TMNFC:
                 map_args = m if m else (['--map', getattr(self, 'map_uid', '')] if getattr(self, 'map_uid', '') else [])
-                return cmd + ['rl-vec', '--iterations', str(max(1, self.rounds)), '--cars', '32'] + map_args + line
+                cars = (self.flags >> 8) & 0xFF
+                if cars == 0:
+                    cars = 32
+                expl_mode = (self.flags >> 6) & 0x03
+                eval_temp = '0.5' if expl_mode == 0 else ('0.85' if expl_mode == 2 else '0.7')
+                return cmd + ['rl-vec', '--iterations', str(max(1, self.rounds)), '--cars', str(cars),
+                              '--eval-temp', eval_temp] + map_args + line
             return cmd + ['improve', '--rounds', str(max(1, self.rounds))] + m + line + \
                 ([] if self.flags & P.JOB_SHOW_BEST else ['--no-show'])
         if self.job == P.JOB_RESIM:

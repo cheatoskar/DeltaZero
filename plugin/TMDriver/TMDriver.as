@@ -77,6 +77,8 @@ float uiSpeed = 1.0f;
 // tool settings
 int jobMap = 0;
 int jobRounds = 20;
+int jobCars = 32;          // parallel cars in TMNF-C (8, 16, 32, 64)
+int jobExploration = 1;    // 0 = Tight / Racing Line, 1 = Balanced [Recommended], 2 = High Exploration
 float jobHours = 3.0f;
 bool jobGpu = true;
 bool jobPerTick = false;
@@ -215,7 +217,9 @@ void SendJob(int job)
     if (client is null) return;
     SendMapIfNew();
     int flags = (jobGpu ? 1 : 0) | (jobPerTick ? 2 : 0) | (jobLine ? 4 : 0) | (jobShowBest ? 8 : 0)
-              | (jobTmnfc ? 16 : 0) | (jobRoute ? 32 : 0);
+              | (jobTmnfc ? 16 : 0) | ((jobLine && jobRoute) ? 32 : 0)
+              | ((jobExploration & 3) << 6)
+              | ((jobCars & 0xFF) << 8);
     client.Write(P_JOB);
     client.Write(job);
     client.Write(jobMap);
@@ -757,60 +761,104 @@ void Render()
             UI::TextWrapped("Start 'Start_DeltaZero.bat' in the DeltaZero folder first.");
         }
         UI::Separator();
+
+        // --- Quick Action Buttons ---
+        UI::BeginDisabled(client is null || mode != MODE_IDLE);
+        if (UI::Button("Drive")) SendJob(JOB_DRIVE);
+        Tip("The AI plans a fast line, visualizes it with path boxes in the game, and drives it.");
+        UI::SameLine();
+        if (UI::Button(jobTmnfc ? "Train (TMNF-C Fast)" : "Train (In-Game)")) SendJob(JOB_TRAIN);
+        Tip(jobTmnfc ? "Train the map with parallel cars in TMNF-C on the GPU (hyper-fast batch RL)."
+                     : "The AI practises this map inside the game window.");
+        UI::SameLine();
+        if (UI::Button("Show best run")) SendJob(JOB_SHOW);
+        Tip("Plays the fastest saved run for this map visibly in the game.");
+        UI::EndDisabled();
+
+        UI::SameLine();
+        UI::BeginDisabled(client is null && mode == MODE_IDLE);
+        if (UI::Button("Stop")) StartMode(MODE_IDLE);
+        Tip("Stops the active job, training, or live driving mode.");
+        UI::EndDisabled();
+
+        UI::TextWrapped("Each button opens a console window with live progress.");
+        UI::Separator();
+
+        // --- Map & Environment ---
         jobMap = UI::InputInt("Map (TMX id)", jobMap, 0);
         if (jobMap < 0) jobMap = 0;
-        Tip("0 = the map that is loaded now. Otherwise the TMX id, e.g. 10036840 for lolsport.");
+        Tip("0 = the map that is loaded now in the game. Otherwise the TMX id, e.g. 10036840 for lolsport.");
         string gameFolder = GetVariableString("tmdriver_game_folder");
         UI::TextWrapped("Game folder: " + (gameFolder == "" ? "auto" : gameFolder));
         Tip("Where the game keeps Tracks\\Challenges (maps are downloaded there). auto = Python picks "
             "Documents\\TmForever or Documents\\TrackMania, whichever was used last. To set it, type in the "
             "TMI console: set tmdriver_game_folder C:\\Users\\<you>\\Documents\\TrackMania");
-        jobGpu = UI::Checkbox("Use GPU (CUDA)", jobGpu);
-        Tip("Off = CPU. CUDA accelerates inference and batch RL.");
-        jobLine = UI::Checkbox("Use reference line / route", jobLine);
-        Tip("On: the AI follows a reference line (TMX replay or TMNF-C Route Planner). Highly recommended! Off: blocks only.");
-        jobRoute = UI::Checkbox("Force Route Planner (TMNF-C)", jobRoute);
-        Tip("Compute 2.5D geometric route from track blocks using TMNF-C Dijkstra instead of human replays.");
-        jobTmnfc = UI::Checkbox("Fast Training: TMNF-C Batch RL on GPU", jobTmnfc);
-        Tip("When clicking Train: runs 32 cars simultaneously in TMNF-C on GPU (100x faster than game window simulation).");
-        UI::BeginDisabled(client is null || mode != MODE_IDLE);
-        if (UI::Button("Drive")) SendJob(JOB_DRIVE);
-        Tip("The AI drives the map in simulation, draws its line as small boxes, then drives it visibly.");
-        UI::SameLine();
-        if (UI::Button("Show best run")) SendJob(JOB_SHOW);
-        Tip("Plays the best run (from Train or TMNF-C RL) visibly in the game.");
-        jobRounds = UI::SliderInt("Iterations / Rounds", jobRounds, 1, 200);
-        Tip("Training iterations. With TMNF-C: iterations of 32-car batched PPO. In-game: simulation rounds.");
-        jobShowBest = UI::Checkbox("Show new best runs", jobShowBest);
-        Tip("Train: after training, drive the best run visibly in the game.");
-        if (UI::Button(jobTmnfc ? "Train (TMNF-C Fast)" : "Train (In-Game)")) SendJob(JOB_TRAIN);
-        Tip(jobTmnfc ? "Train the map with 32 cars in parallel on the GPU using TMNF-C." : "The AI practises this map in the game.");
-        UI::EndDisabled();
-        UI::SameLine();
-        UI::BeginDisabled(client is null);
-        if (UI::Button("Stop")) StartMode(MODE_IDLE);
-        Tip("Stops the running job or mode.");
-        UI::EndDisabled();
-        UI::TextWrapped("Each button opens a console with live progress.");
 
-        if (UI::CollapsingHeader("Helper instances")) {
+        // --- AI Driving & Line Guidance ---
+        if (UI::CollapsingHeader("AI Driving & Line Guidance")) {
+            jobGpu = UI::Checkbox("Use GPU (CUDA)", jobGpu);
+            Tip("Checked = CUDA GPU acceleration for neural network inference and RL. Unchecked = CPU.");
+            jobLine = UI::Checkbox("Use reference line / route", jobLine);
+            Tip("Checked (Recommended): AI follows a reference line (TMX replay or TMNF-C Route Planner). Unchecked: AI drives based on map blocks only.");
+
+            UI::BeginDisabled(!jobLine);
+            jobRoute = UI::Checkbox("Force Route Planner (TMNF-C)", jobRoute);
+            Tip(jobLine ? "Calculate 2.5D geometric shortest route through checkpoints from track geometry (Dijkstra) instead of searching for human replays."
+                        : "Disabled: enable 'Use reference line / route' first.");
+            UI::EndDisabled();
+        }
+
+        // --- Reinforcement Learning & Training ---
+        if (UI::CollapsingHeader("Reinforcement Learning & Training")) {
+            jobTmnfc = UI::Checkbox("Fast Training: TMNF-C Batch RL on GPU", jobTmnfc);
+            Tip("Checked (Recommended): runs 8 to 64 cars in parallel directly in the C++ physics engine on your GPU (100x faster). Unchecked: runs simulation rounds in the game window.");
+
+            jobRounds = UI::SliderInt("Iterations / Rounds", jobRounds, 1, 200);
+            Tip("Number of training iterations (e.g. 20 iterations of batched PPO).");
+
+            UI::BeginDisabled(!jobTmnfc);
+            jobCars = UI::SliderInt("Parallel Cars (TMNF-C)", jobCars, 8, 64);
+            Tip(jobTmnfc ? "Number of cars simulated simultaneously in one TMNF-C C++ world on the GPU (default 32)."
+                         : "Disabled: Only applicable when Fast Training (TMNF-C Batch RL) is enabled.");
+            UI::EndDisabled();
+
+            jobExploration = UI::SliderInt("Exploration Profile", jobExploration, 0, 2);
+            string explDesc = (jobExploration == 0) ? "Tight / Racing Line (low noise, high finish rate)" :
+                              ((jobExploration == 2) ? "Aggressive Exploration (tests wide cuts, slides, alternative lines)" :
+                                                       "Balanced (recommended: exploits best line + refines apexes)");
+            UI::Text("  Profile: " + explDesc);
+            Tip("Controls rollout temperature schedule across the simulated fleet:\n"
+                "0 = Tight: 0.25 - 0.70 temp (high finish rate, reliable on narrow tracks)\n"
+                "1 = Balanced: 0.35 - 0.90 temp (optimal mix of line exploitation & corner discovery)\n"
+                "2 = Aggressive: 0.50 - 0.98 temp (large exploration for cuts and shortcuts)");
+
+            jobShowBest = UI::Checkbox("Show new best runs in game", jobShowBest);
+            Tip("When checked: after a new best lap time is discovered, it is played back visibly in the game.");
+        }
+
+        // --- Helper Instances (Multi-Window) ---
+        if (UI::CollapsingHeader("Helper Instances (Multi-Game Windows)")) {
+            if (jobTmnfc) {
+                UI::TextWrapped("Notice: Multi-window helpers are NOT needed when Fast Training (TMNF-C) is active, because TMNF-C already simulates up to 64 cars internally on GPU.");
+            }
+            UI::BeginDisabled(client is null || mode != MODE_IDLE || jobTmnfc);
             jobHelpers = UI::SliderInt("Helpers", jobHelpers, 1, MAX_INSTANCES - 1);
-            UI::BeginDisabled(client is null || mode != MODE_IDLE);
             if (UI::Button("Launch helpers")) {
                 int saved = jobRounds;
                 jobRounds = jobHelpers;
                 SendJob(JOB_LAUNCH);
                 jobRounds = saved;
             }
-            Tip("Starts more game instances (TMLoader profile DeltaZero). Log in to each; the status "
-                "line here shows how many are ready. Re-simulate then uses all of them.");
+            Tip(jobTmnfc ? "Disabled: TMNF-C is active and already runs parallel cars on GPU without extra game windows."
+                         : "Starts more game instances (TMLoader profile DeltaZero). Log in to each; re-simulation uses all of them.");
             UI::EndDisabled();
         }
-        if (UI::CollapsingHeader("Data: re-simulate replays")) {
+
+        // --- Data: Re-simulate Replays ---
+        if (UI::CollapsingHeader("Data: Re-simulate Replays")) {
             jobHours = UI::SliderFloat("Hours", jobHours, 0.1f, 24.0f, "%.1f h");
             jobPerTick = UI::Checkbox("Per-tick mode (slower, verified)", jobPerTick);
-            Tip("Default: the plugin plays each replay's inputs itself (batch mode). Per tick: Python "
-                "answers every tick; use it if batch mode reports runs that are not exact.");
+            Tip("Default: the plugin plays each replay's inputs itself (batch mode). Per tick: Python answers every tick; use it if batch mode reports runs that are not exact.");
             UI::BeginDisabled(client is null || mode != MODE_IDLE);
             if (UI::Button("Re-simulate replays")) SendJob(JOB_RESIM);
             Tip("Plays TMX replays in the game and saves the full physics state (data/resim). "
@@ -818,8 +866,10 @@ void Render()
                 "downloaded maps if the bulk list exists, else the open map. Stops after the hours above.");
             UI::EndDisabled();
         }
-        if (UI::CollapsingHeader("Advanced")) {
-            UI::BeginDisabled(client is null);
+
+        // --- Live Driving & Diagnostics ---
+        if (UI::CollapsingHeader("Live Driving & Diagnostics")) {
+            UI::BeginDisabled(client is null || mode != MODE_IDLE);
             if (UI::Button("Record (drive yourself)")) StartMode(MODE_RECORD);
             Tip("Records your own run as a reference line for the AI.");
             UI::SameLine();

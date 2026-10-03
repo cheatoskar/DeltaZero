@@ -179,15 +179,25 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
             # the evaluation run: temperature eval_temp with a fixed seed, not argmax. Measured 2026-09-27 on
             # lolsport: argmax (and 0.3) never finishes, 0.7 finished 12/12 with the RL model (the policy
             # dithers between steer bins every 50 ms as a stand-in for analog steering)
+            # Multi-temperature fleet schedule:
+            # 1 evaluation run at eval_temp with a fixed seed.
+            # Sampled runs scheduled smoothly from exploitation (0.35) to exploration (0.85):
+            # - Lower temp runs (0.35-0.45) reliably finish and establish strong baseline lap times.
+            # - Mid temp runs (0.50-0.70) refine cornering, drifts, and braking points.
+            # - High temp runs (0.75-0.85) explore aggressive cuts and alternative paths.
             eps = [ImproveEpisode(policy_view(policy), limit, eval_temp, 12345)]
-            for _ in range(runs):
+            t_min = max(0.25, round(eval_temp - 0.35, 2))
+            t_max = min(0.98, round(eval_temp + 0.20, 2))
+            for idx in range(runs):
                 seed += 1
-                eps.append(ImproveEpisode(policy_view(policy), limit, 1.0, seed))
+                frac = idx / max(1, runs - 1)
+                temp = round(t_min + (t_max - t_min) * frac, 3)
+                eps.append(ImproveEpisode(policy_view(policy), limit, temp, seed))
             res = runner.run(eps)
             t_roll = time.perf_counter() - t0
-            evaluation, sampled = res[0], res[1:]
+            evaluation = res[0]
             decisions, rewards, dones = [], [], []
-            for r in sampled:
+            for r in res:
                 st_ = episode_steps(r)
                 if st_ is None:
                     continue
@@ -211,7 +221,7 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
                 best_policy = {k: v.detach().clone() for k, v in model.state_dict().items()}
                 torch.save(dict(torch.load(ckpt, map_location='cpu', weights_only=False),
                                 state_dict=model.state_dict(), rl_on=uid), out_dir / 'model_best.pt')
-            elif best_policy is not None and (rate < 0.5 * best_rate or stats.get('kl_ref', 0) > kl_max):
+            elif best_policy is not None and it >= warmup and not improved and (rate < 0.25 * best_rate or stats.get('kl_ref', 0) > kl_max):
                 model.load_state_dict(best_policy)
                 for gr in opt.param_groups:
                     gr['lr'] *= 0.5

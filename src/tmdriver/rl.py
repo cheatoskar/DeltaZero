@@ -38,7 +38,7 @@ from .session import GameSession
 OUT = RUNS / 'rl'
 PROGRESS_W = 0.01        # reward per metre of judged progress
 TIME_W = 0.05            # penalty per 50 ms (1 per second)
-FINISH_BONUS = 1.0
+FINISH_BONUS = 25.0
 
 
 class Critic(nn.Module):
