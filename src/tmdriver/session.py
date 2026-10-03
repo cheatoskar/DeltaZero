@@ -373,8 +373,10 @@ class GameSession:
                     # would be wrong; answer it here like the loop does)
                     return self._finish_now(episodes, results, ep, start, keep, batch)
         if phase == 'first':
+            link.restart()
             link.mode(P.MODE_TEST)
             link.flush()
+            phase = 'restarting'
         while True:
             kind, st = self.next(timeout=self.STEP_TIMEOUT_S)
             if kind == P.P_UI and st[0] == P.MODE_IDLE:
@@ -386,20 +388,11 @@ class GameSession:
                 continue
             if kind != P.P_STEP:
                 continue
-            if phase == 'first':
-                if st.race_time > 0:         # not a fresh race: restart it
-                    link.restart()
-                    link.action(0, 0, 0)
-                    phase = 'restarting'
-                    continue
-                phase = 'wait0'
             if phase == 'restarting':
                 if st.race_time > 0:         # the restart has not happened yet
                     link.action(0, 0, 0)
                     continue
-                # Fall through WITHOUT answering: wait0 answers this STEP. Two ACTIONs for one
-                # STEP made the plugin take the extra one as the next tick's answer, so every
-                # later input (and SAVE) landed one tick late (found 2026-09-25).
+                # Fall through WITHOUT answering: wait0 answers this STEP.
                 phase = 'wait0'
             if phase == 'wait0':
                 if st.race_time < 0:

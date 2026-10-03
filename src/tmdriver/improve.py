@@ -469,11 +469,34 @@ def map_file_for(uid: str, track_id: Optional[int], log=print) -> Optional[str]:
             return tmx.fetch(tid, 0, TMX, safe, log=lambda *a: None)['map'].name
     except Exception as e:
         log(f'  TMX: {e}')
+    # Check persistent cache first
+    from .paths import DATA
+    cache_file = DATA / 'map_uids_cache.json'
+    cache = {}
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text(encoding='utf-8'))
+            if uid in cache and Path(cache[uid]).exists():
+                return cache[uid]
+        except Exception:
+            pass
     # If not on TMX or offline: search local tracks_dir for the map file containing this uid
     try:
         from .virtual_game import map_dirs
+        t0 = time.time()
         for md in map_dirs():
             base = Path(md)
+            # 1. Search shallow in TMDriver folder first (fast)
+            if base.name == 'TMDriver' and base.exists():
+                for f in base.glob('*.Challenge.Gbx'):
+                    try:
+                        if uid.encode() in f.read_bytes()[:2048]:
+                            cache[uid] = str(f.resolve())
+                            cache_file.write_text(json.dumps(cache, indent=1), encoding='utf-8')
+                            return cache[uid]
+                    except Exception:
+                        continue
+            # 2. Broader search with 2.5s time budget
             search_dirs = [base]
             if base.parent.name == 'Tracks' or base.name == 'TMDriver':
                 search_dirs.append(base.parent)  # Tracks/Challenges
@@ -481,11 +504,17 @@ def map_file_for(uid: str, track_id: Optional[int], log=print) -> Optional[str]:
                 if not d.exists():
                     continue
                 for f in d.glob('**/*.Challenge.Gbx'):
+                    if time.time() - t0 > 2.5:
+                        break
                     try:
                         if uid.encode() in f.read_bytes()[:2048]:
-                            return str(f.resolve())
+                            cache[uid] = str(f.resolve())
+                            cache_file.write_text(json.dumps(cache, indent=1), encoding='utf-8')
+                            return cache[uid]
                     except Exception:
                         continue
+                if time.time() - t0 > 2.5:
+                    break
     except Exception as e:
         log(f'  local map search: {e}')
     return None

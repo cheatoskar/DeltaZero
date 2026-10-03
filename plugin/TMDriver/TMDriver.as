@@ -213,6 +213,7 @@ void WriteStr(const string&in s)
 void SendJob(int job)
 {
     if (client is null) return;
+    SendMapIfNew();
     int flags = (jobGpu ? 1 : 0) | (jobPerTick ? 2 : 0) | (jobLine ? 4 : 0) | (jobShowBest ? 8 : 0)
               | (jobTmnfc ? 16 : 0) | (jobRoute ? 32 : 0);
     client.Write(P_JOB);
@@ -320,6 +321,8 @@ int ReadMessage(SimulationManager@ simManager, uint64 deadline)
         int m = client.ReadInt32();
         if (m == MODE_IDLE && mode != MODE_IDLE) {
             pendingRelease = true;
+        } else if (m != MODE_IDLE) {
+            finishSent = false;
         }
         mode = m;
     } else if (type == C_EXEC) {
@@ -715,6 +718,7 @@ void Render()
             client.Write(P_HELLO);
             client.Write(PROTOCOL);
             log("TMDriver: Python connected (" + client.RemoteIP + ")", Severity::Success);
+            SendMapIfNew();
         }
     }
 
@@ -740,6 +744,8 @@ void Render()
         ExecuteCommand(pendingExec[i]);
     }
     pendingExec.Resize(0);
+
+    if (client !is null) SendMapIfNew();
 
     if (UI::Begin("DeltaZero")) {
         UI::Text(client is null ? "Python: not connected" : "Python: connected (" + ModeName(mode) + ")");
