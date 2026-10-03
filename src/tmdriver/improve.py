@@ -608,8 +608,8 @@ def reference_setup(uid: str, track_id: Optional[int], use_line: bool, log=print
     elif use_line:
         ref = reference(uid, track_id, log)
     else:
-        # Line is OFF: do NOT fetch human TMX ghosts. Use planned geometric centerline if available.
-        ref = planned_route(uid, track_id, log=lambda *a: None)
+        # Line is OFF: drive with pure geometry (track cells + checkpoints). No invisible judge choking the car.
+        ref = None
 
     if use_line and ref is None:
         log('WARNING: line requested, but no reference route available: driving WITHOUT the line')
