@@ -163,7 +163,7 @@ class Runner:
 def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int = 50, runs: int = 64,
                  cars: int = 32, use_line: bool = False, ckpt: Path = None, lr: float = 1e-5,
                  critic_lr: float = 1e-3, warmup: int = 2, kl_coef: float = 0.1, ent_coef: float = 0.01,
-                 kl_max: float = 0.15, eval_temp: float = 0.7, branch: int = 16, seed: Optional[int] = None, log=print):
+                 kl_max: float = 0.25, eval_temp: float = 0.7, branch: int = 16, seed: Optional[int] = None, log=print):
     from .replaybuild import map_blocks
     from .tmnfc_sim import CarSim
     from .virtual_game import tmi_waypoint

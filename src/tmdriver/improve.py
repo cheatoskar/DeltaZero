@@ -230,7 +230,8 @@ def branch_point(best: dict, rng) -> Optional[int]:
     if best['finished']:
         t = rng.uniform(0.05, 0.95) * best['time_ms']
     else:
-        t = best['stall_t'] - rng.uniform(1000, 4000)
+        # 2 to 8 seconds before stall: provides enough run-up (Anlauf) for steep hills & jumps
+        t = best['stall_t'] - rng.uniform(2000, 8000)
     t = int(t // 100 * 100)
     return t if t >= 500 else None
 
