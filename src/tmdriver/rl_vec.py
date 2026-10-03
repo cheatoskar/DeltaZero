@@ -21,7 +21,7 @@ from . import protocol as P
 from .fleet import policy_view
 from .ghost_policy import GhostPolicy, forward_many
 from .improve import ImproveEpisode, reference_setup, run_text, score, tmi_script
-from .paths import DRIVER_CKPT, safe, torch_device
+from .paths import DRIVER_CKPT, safe, tmi_scripts_dir, torch_device
 from .rl import OUT, Batch, Critic, episode_steps, ppo_update
 
 
@@ -170,7 +170,12 @@ def rl_vec_train(map_file: Path, track_id: Optional[int] = None, iterations: int
             (out_dir / 'best_run.json').write_text(json.dumps({
                 'map': name, 'uid': uid, 'time_ms': best_now['time_ms'], 'progress_m': best_now['progress_m'],
                 'line': line_txt, 'ticks': best_now['ticks'], 'path': best_now['path']}), encoding='utf-8')
-            (out_dir / 'best_inputs.txt').write_text(tmi_script(best_now['ticks']), encoding='utf-8')
+            script_txt = tmi_script(best_now['ticks'])
+            (out_dir / 'best_inputs.txt').write_text(script_txt, encoding='utf-8')
+            try:
+                (tmi_scripts_dir() / f'{safe(name)}.txt').write_text(script_txt, encoding='utf-8')
+            except Exception:
+                pass
 
     try:
         for it in range(iterations):

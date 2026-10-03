@@ -31,3 +31,9 @@ TMX = DATA / 'tmx'              # TMX replays by map uid, for the self test
 
 def safe(uid: str) -> str:
     return ''.join(c if c.isalnum() or c in '-_' else '_' for c in uid) or 'unknown'
+
+
+def tmi_scripts_dir() -> Path:
+    d = Path(os.path.expanduser('~')) / 'Documents' / 'TMInterface' / 'Scripts'
+    d.mkdir(parents=True, exist_ok=True)
+    return d

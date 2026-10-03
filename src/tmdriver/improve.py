@@ -29,7 +29,7 @@ import torch.nn.functional as TF
 
 from . import protocol as P
 from .ghost_policy import GhostPolicy
-from .paths import DATA, DRIVER_CKPT, RUNS, safe, torch_device
+from .paths import DATA, DRIVER_CKPT, RUNS, safe, tmi_scripts_dir, torch_device
 from .session import Episode, GameSession
 
 OUT = RUNS / 'improve'
@@ -649,7 +649,12 @@ def improve(link, track_id: Optional[int] = None, rounds: int = 20, episodes: in
         and when the training is stopped early)."""
         if best is None or saved[0] == score(best):
             return
-        (out / 'best_inputs.txt').write_text(tmi_script(best['ticks']), encoding='utf-8')
+        script_txt = tmi_script(best['ticks'])
+        (out / 'best_inputs.txt').write_text(script_txt, encoding='utf-8')
+        try:
+            (tmi_scripts_dir() / f'{safe(name)}.txt').write_text(script_txt, encoding='utf-8')
+        except Exception:
+            pass
         (out / 'best_run.json').write_text(json.dumps({
             'map': name, 'uid': uid, 'time_ms': best['time_ms'], 'progress_m': best['progress_m'],
             'cps': best.get('cps'), 'line': line_txt, 'round': rnd + 1, 'ticks': best['ticks'],
@@ -756,29 +761,34 @@ def show_best(link, track_id: Optional[int] = None, speed: float = 1.0, log=prin
     """Play the best run that `improve` or `rl-vec` found on this map."""
     sess = GameSession(link, log)
     open_map(sess, track_id, 0, log)
-    f_imp = OUT / safe(sess.map.uid) / 'best_run.json'
-    f_rl = RUNS / 'rl' / safe(sess.map.uid) / 'best_run.json'
-    f = None
-    if f_rl.exists() and f_imp.exists():
-        try:
-            r_rl = json.loads(f_rl.read_text(encoding='utf-8'))
-            r_imp = json.loads(f_imp.read_text(encoding='utf-8'))
-            t_rl = r_rl.get('time_ms') or 99999999
-            t_imp = r_imp.get('time_ms') or 99999999
-            f = f_rl if t_rl <= t_imp else f_imp
-        except Exception:
-            f = f_rl if f_rl.exists() else f_imp
-    elif f_rl.exists():
-        f = f_rl
-    elif f_imp.exists():
-        f = f_imp
+    u = safe(sess.map.uid)
+    cands = [
+        (RUNS / 'rl' / f'{u}_vec' / 'best_run.json', 'TMNF-C RL'),
+        (RUNS / 'rl' / u / 'best_run.json', 'In-game RL'),
+        (OUT / u / 'best_run.json', 'improve'),
+    ]
+    f, src_tag = None, 'TMNF-C RL'
+    best_time = 999999999
+    best_prog = -1.0
+    for cand, tag in cands:
+        if cand.exists():
+            try:
+                data = json.loads(cand.read_text(encoding='utf-8'))
+                t = data.get('time_ms')
+                p = data.get('progress_m', 0.0)
+                if t is not None and t < best_time:
+                    best_time, f, src_tag = t, cand, tag
+                elif best_time == 999999999 and p > best_prog:
+                    best_prog, f, src_tag = p, cand, tag
+            except Exception:
+                if f is None:
+                    f, src_tag = cand, tag
 
     if not f or not f.exists():
         sess.status('No best run for this map yet: press "Train" first.')
         raise SystemExit(f'no best run for {sess.map.name!r} yet; train on the map first')
     run = json.loads(f.read_text(encoding='utf-8'))
     txt = f"{run['time_ms'] / 1000:.2f}s" if run.get('time_ms') else f"{run.get('progress_m', 0):.0f} m"
-    src_tag = 'TMNF-C RL' if f == f_rl else 'improve'
     log(f"best run on {run['map']!r}: {txt} ({src_tag}, line {run.get('line', '?')})")
     sess.ensure_drivable()
     sess.status(f'Best run ({txt}, {src_tag}): showing it')
@@ -805,15 +815,43 @@ def drive_preview(link, track_id: Optional[int] = None, speed: float = 1.0, ckpt
     draw(link, [])
     sess.ensure_drivable()
     sess.status(f'AI is planning its line ({plans} tries, {line_tag}; the game is frozen meanwhile) ...')
-    log(f'planning {plans} runs (the game is frozen meanwhile) ...')
     pace, seed = Pace(), int(np.random.default_rng().integers(1_000_000))
-    eps = [PlanEpisode(policy, 180000, 0.0, seed, 1, plans, pace, log)] + \
-        [PlanEpisode(policy, 180000, temps[k % len(temps)], seed + k + 1, k + 2, plans, pace, log)
-         for k in range(plans - 1)]
-    res = sess.run(eps, sim_only=True)
-    plan = max(res, key=score)
-    log(f"plans: greedy {run_text(res[0])}, {sum(r['finished'] for r in res)}/{len(res)} finished, "
-        f"best {run_text(plan)} (temperature {plan['temp']})")
+    mf = map_file_for(uid, track_id, log)
+    used_tmnfc = False
+    plan = None
+    if mf and Path(mf).exists():
+        try:
+            from .tmnfc_sim import CarSim
+            from .rl_vec import Runner
+            from .fleet import policy_view
+            sess.status(f'AI is planning instantly in TMNF-C ({plans} runs on GPU, {line_tag}) ...')
+            log(f'planning {plans} runs in TMNF-C on GPU ({line_tag}) ...')
+            t_plan0 = time.perf_counter()
+            sim = CarSim(Path(mf), track_id or 0, n=min(plans, 32))
+            runner = Runner(policy, sim)
+            plan_eps = [ImproveEpisode(policy_view(policy), 180000, 0.0, seed)] + \
+                [ImproveEpisode(policy_view(policy), 180000, temps[k % len(temps)], seed + k + 1)
+                 for k in range(plans - 1)]
+            res = runner.run(plan_eps)
+            sim.close()
+            plan = max(res, key=score)
+            log(f"TMNF-C planned {plans} runs in {time.perf_counter() - t_plan0:.2f}s: greedy {run_text(res[0])}, "
+                f"{sum(r['finished'] for r in res)}/{len(res)} finished, best {run_text(plan)}")
+            used_tmnfc = True
+        except Exception as e:
+            log(f'TMNF-C planning fallback to in-game: {e}')
+            used_tmnfc = False
+
+    if not used_tmnfc:
+        sess.status(f'AI is planning its line ({plans} tries, {line_tag}; the game is frozen meanwhile) ...')
+        log(f'planning {plans} runs (the game is frozen meanwhile) ...')
+        eps = [PlanEpisode(policy, 180000, 0.0, seed, 1, plans, pace, log)] + \
+            [PlanEpisode(policy, 180000, temps[k % len(temps)], seed + k + 1, k + 2, plans, pace, log)
+             for k in range(plans - 1)]
+        res = sess.run(eps, sim_only=True)
+        plan = max(res, key=score)
+        log(f"plans: greedy {run_text(res[0])}, {sum(r['finished'] for r in res)}/{len(res)} finished, "
+            f"best {run_text(plan)} (temperature {plan['temp']})")
     txt = run_text(plan) if plan['finished'] else f"{plan['reason']} after {run_text(plan)}"
     log(f'plan: {txt}, {len(plan["path"])} path samples')
     draw(link, plan['path'])
