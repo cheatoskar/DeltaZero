@@ -16,8 +16,8 @@ An autonomous driving AI for **TrackMania Nations Forever** that learns to race 
 - **Client-Free Headless Physics (TMNF-C):** Includes a native Windows port of [TMNF-C](https://github.com/adonis-singh/TMNF-C) for exact, bit-deterministic physics re-simulation at thousands of ticks per second without launching the game client (`sim-night`, `virtual`).
 - **Learned Topological Route Planner (v3):** Solves track progression from start through checkpoints to the finish across a 2.5D rasterized collision mesh using Dijkstra with learned transit costs (`route_cost_model.json`). Enables zero-shot racing on complex community tracks without human replays.
 - **Batched Vectorized RL (`rl-vec`):** High-throughput PPO reinforcement learning simulating dozens of cars in parallel inside headless TMNF-C worlds with automatic policy checkpointing (`model_best.pt`) and learning rate decay on divergence.
-- **Pretrained Checkpoints Shipped In-Repo:** Comes out-of-the-box with `runs/ghost_resim/best.pt`—a 14.7M parameter transformer model fine-tuned on exact TMNF-C physics re-simulations.
-- **Deterministic 3D Plan Visualization:** Plans its driving line in simulation, renders the planned trajectory directly in the game as 3D trigger boxes, and then drives it visibly in real time.
+- **Snapshot Branching & Checkpoint Curriculum:** Automatically detects bottlenecks or stalls along a run, captures the full C++ physics state and policy memory (`sim.capture()`), and branches a sub-fleet mid-track at high velocity to master challenging obstacles and shave seconds off apexes.
+- **Deterministic 3D Plan Visualization & TMInterface Script Export:** Plans its driving line in simulation, renders the planned trajectory directly in the game as 3D trigger boxes, and automatically exports best runs directly to `Documents/TMInterface/Scripts/<Map>.txt` for instant replay with the game's `load` command.
 
 ---
 
@@ -138,7 +138,10 @@ Run `python tmdriver.py <command>` for full control:
 | `check-hold` | Tests whether `--hold 5` matches 1-tick precision in the game engine. |
 | `fetch-tmx <ID>` | Fetches a map and its top replays directly from ManiaExchange. |
 
----
+### Key Flags
+- `--route [auto|plan|none]`: `auto` selects available lines; `plan` generates 3D route from map geometry via Dijkstra (zero human replays); `none` evaluates purely on track cells and checkpoints without ghost lines.
+- `--branch <N>`: Number of cars to branch mid-track from bottlenecks/stalls via physics snapshotting (default: 16).
+- `--device [auto|cuda|cpu]`: Hardware acceleration for neural network inference and PPO updates (default: auto).
 
 ## Headless Simulation with TMNF-C
 
