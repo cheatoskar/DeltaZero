@@ -175,6 +175,12 @@ python tests/test_rl_fake.py
 
 ---
 
+## Development Note
+
+This project was developed with the help of [Claude Code](https://claude.com/claude-code). The ideas, presets, design and testing are my own, with AI assisting throughout the development process. If you find a bug, please report it in the [issues](https://github.com/cheatoskar/DeltaZero/issues).
+
+---
+
 ## Credits & Acknowledgements
 
 - **[ManiaExchange (TMX)](https://tmnf.exchange)** for providing the public replay and map archive.
